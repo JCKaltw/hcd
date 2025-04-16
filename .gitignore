@@ -1,2 +1,4 @@
 env
 /*.xlsx
+test/
+test_done/

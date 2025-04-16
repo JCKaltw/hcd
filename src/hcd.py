@@ -1,23 +1,39 @@
 # src/hdc.py
+
+#!/usr/bin/env python3
+
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import timedelta
 from openpyxl import load_workbook
-from google.colab import drive
+# Removed google.colab import for local usage on Mac OS
+# from google.colab import drive
 
-# Mount Google Drive
-if not os.path.exists('/content/drive'):
-    drive.mount('/content/drive', force_remount=True)
-    print('Drive mounted')
-else:
-    print('Drive already mounted at /content/drive')
+# --------------------------------------------------------------------------------
+# The following lines were removed to eliminate Google Colab references:
+#
+# if not os.path.exists('/content/drive'):
+#     drive.mount('/content/drive', force_remount=True)
+#     print('Drive mounted')
+# else:
+#     print('Drive already mounted at /content/drive')
+# --------------------------------------------------------------------------------
 
 # Configuration
-source_folder = "/content/drive/My Drive/test"
-target_folder = "/content/drive/My Drive/test_done"
+# Updated to local folders instead of Google Drive
+source_folder = "./test"       # You can modify this path as needed
+target_folder = "./test_done"  # You can modify this path as needed
 
 def process_file(filepath, savepath):
+    """
+    Processes a single .xlsx file. It reads from the input path,
+    applies transformations, detects heating cycles, and writes
+    the result to a new Excel file with multiple sheets.
+
+    :param filepath: The path to the source Excel file
+    :param savepath: The path where the transformed Excel file will be saved
+    """
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -124,11 +140,18 @@ def process_file(filepath, savepath):
         summary_df.to_excel(writer, sheet_name="Heat Cleaned Data", index=False)
     print(f"✅ Processed and saved: {savepath}")
 
-# Process all Excel files
-for filename in os.listdir(source_folder):
-    if filename.endswith(".xlsx") and not filename.startswith("~$"):
-        full_path = os.path.join(source_folder, filename)
-        name, ext = os.path.splitext(filename)
-        save_path = os.path.join(target_folder, f"{name}_heat sp numbers.xlsx")
-        process_file(full_path, save_path)
+def main():
+    """
+    Main function that processes all Excel files from the `source_folder`
+    and writes the transformed data to `target_folder`.
+    """
+    # Process all Excel files
+    for filename in os.listdir(source_folder):
+        if filename.endswith(".xlsx") and not filename.startswith("~$"):
+            full_path = os.path.join(source_folder, filename)
+            name, ext = os.path.splitext(filename)
+            save_path = os.path.join(target_folder, f"{name}_heat sp numbers.xlsx")
+            process_file(full_path, save_path)
 
+if __name__ == "__main__":
+    main()
