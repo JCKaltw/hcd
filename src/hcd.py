@@ -1,14 +1,11 @@
-# src/hdc.py
-
-#!/usr/bin/env python3
+# src/hcd.py
 
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import timedelta
 from openpyxl import load_workbook
-# Removed google.colab import for local usage on Mac OS
-# from google.colab import drive
+# from google.colab import drive  # Removed for local usage
 
 # --------------------------------------------------------------------------------
 # The following lines were removed to eliminate Google Colab references:
@@ -21,19 +18,14 @@ from openpyxl import load_workbook
 # --------------------------------------------------------------------------------
 
 # Configuration
-# Updated to local folders instead of Google Drive
-source_folder = "./test"       # You can modify this path as needed
-target_folder = "./test_done"  # You can modify this path as needed
+# Changed to local folders instead of Google Drive paths.
+source_folder = "./test"        # You can modify as needed
+target_folder = "./test_done"   # You can modify as needed
+
+# Ensure that target folder exists
+os.makedirs(target_folder, exist_ok=True)
 
 def process_file(filepath, savepath):
-    """
-    Processes a single .xlsx file. It reads from the input path,
-    applies transformations, detects heating cycles, and writes
-    the result to a new Excel file with multiple sheets.
-
-    :param filepath: The path to the source Excel file
-    :param savepath: The path where the transformed Excel file will be saved
-    """
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -44,6 +36,7 @@ def process_file(filepath, savepath):
 
     # Rename 7th column to "Note"
     if df.columns.size >= 7:
+        print(f"📄 Processing file: {filepath}")
         df.columns.values[6] = "Note"
         if "Note" in df.columns:
             df = df[df["Note"] == "Test Run"].copy()
@@ -66,7 +59,32 @@ def process_file(filepath, savepath):
     df["Enable"] = df["State"].apply(lambda x: 1 if x == "Enable" else "")
     df["Disable"] = df["State"].apply(lambda x: 1 if x == "Disable" else "")
 
-    # Use all filtered Test Run data for heating detection
+    # Step 4: Clean up duplicate/missing timestamps before heat detection
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date").reset_index(drop=True)
+
+    # Capture duplicate rows (keep last, discard others)
+    duplicates = df[df.duplicated(subset="Date", keep="last")]
+
+    # Remove duplicates by keeping the last occurrence
+    df = df.drop_duplicates(subset="Date", keep="last")
+
+    # Generate a complete timestamp range at 1-minute frequency
+    full_range = pd.date_range(start=df["Date"].min(), end=df["Date"].max(), freq="1min")
+    df_full = pd.DataFrame({"Date": full_range})
+
+    # Merge to find missing times
+    df = pd.merge(df_full, df, on="Date", how="left")
+
+    # Forward fill row values from previous valid row
+    fill_cols = ["Device Name", "MAC Serial #", "Enable", "Disable", "Note"]
+    df[fill_cols] = df[fill_cols].fillna(method="ffill")
+
+    # Save discarded rows (duplicates + newly null rows after merge)
+    discarded = pd.concat([duplicates, df[df.isnull().any(axis=1)]], ignore_index=True)
+    df = df.dropna(subset=["State", "Supply Temp/C", "Return Temp/C"]).copy()
+
+    # Continue with filtered data
     df_filtered = df.copy()
     df_filtered["Date"] = pd.to_datetime(df_filtered["Date"])
     supply = df_filtered["Supply Temp/C"].values
@@ -131,6 +149,7 @@ def process_file(filepath, savepath):
             })
 
     summary_df = pd.DataFrame(summaries)
+    print("Summary Rows:", len(summary_df))
 
     # Save outputs
     with pd.ExcelWriter(savepath, engine='openpyxl') as writer:
@@ -138,20 +157,13 @@ def process_file(filepath, savepath):
         df.to_excel(writer, sheet_name="Filtered Test Run", index=False)
         heat_data_set.to_excel(writer, sheet_name="Heating Data Set", index=False)
         summary_df.to_excel(writer, sheet_name="Heat Cleaned Data", index=False)
+        discarded.to_excel(writer, sheet_name="Discarded", index=False)
     print(f"✅ Processed and saved: {savepath}")
 
-def main():
-    """
-    Main function that processes all Excel files from the `source_folder`
-    and writes the transformed data to `target_folder`.
-    """
-    # Process all Excel files
-    for filename in os.listdir(source_folder):
-        if filename.endswith(".xlsx") and not filename.startswith("~$"):
-            full_path = os.path.join(source_folder, filename)
-            name, ext = os.path.splitext(filename)
-            save_path = os.path.join(target_folder, f"{name}_heat sp numbers.xlsx")
-            process_file(full_path, save_path)
-
-if __name__ == "__main__":
-    main()
+# Process all Excel files
+for filename in os.listdir(source_folder):
+    if filename.endswith(".xlsx") and not filename.startswith("~$"):
+        full_path = os.path.join(source_folder, filename)
+        name, ext = os.path.splitext(filename)
+        save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
+        process_file(full_path, save_path)
