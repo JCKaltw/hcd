@@ -1,5 +1,6 @@
-# src/hcd.py
-
+# --------------------------------------------------------------------------------
+# /Users/chris/projects/heat-cycle-detection/src/hcd.py
+# --------------------------------------------------------------------------------
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -19,7 +20,7 @@ from openpyxl import load_workbook
 
 # Configuration
 # Changed to local folders instead of Google Drive paths.
-source_folder = "./test"        # You can modify as needed
+source_folder = "./test"        # You can modify as needed (overridden below in main())
 target_folder = "./test_done"   # You can modify as needed
 
 # Ensure that target folder exists
@@ -123,13 +124,12 @@ def process_file(filepath, savepath):
 
     # Step 6: Keep full hours where heating occurred
     df_filtered["Hour"] = df_filtered["Date"].dt.floor("h")
-    heat_hours = df_filtered[df_filtered["Heating"] == "On"]["Hour"].unique()
     df["Date"] = pd.to_datetime(df["Date"])
     df = pd.merge(df, df_filtered[["Date", "Heating", "Heating_Group"]], on="Date", how="left")
     df["Heating"] = df["Heating"].fillna("Off")
     df["Heating_Group"] = df["Heating_Group"].fillna(0).astype(int)
     df["Hour"] = df["Date"].dt.floor("h")
-    heat_data_set = df[df["Hour"].isin(heat_hours)].copy()
+    heat_data_set = df[df["Hour"].isin(df_filtered[df_filtered["Heating"] == "On"]["Hour"].unique())].copy()
 
     # Step 7: Summarize hours with >=55 mins consistent Enable/Disable
     summaries = []
@@ -160,10 +160,48 @@ def process_file(filepath, savepath):
         discarded.to_excel(writer, sheet_name="Discarded", index=False)
     print(f"✅ Processed and saved: {savepath}")
 
-# Process all Excel files
-for filename in os.listdir(source_folder):
-    if filename.endswith(".xlsx") and not filename.startswith("~$"):
-        full_path = os.path.join(source_folder, filename)
-        name, ext = os.path.splitext(filename)
-        save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-        process_file(full_path, save_path)
+def main():
+    """
+    Main entry point for the Heat Cycle Detection script.
+    - Defaults to current working directory for source_folder.
+    - If --input-file is provided, only that file is processed.
+    - Otherwise, processes all .xlsx files in the current directory.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Heat Cycle Detection Script")
+    parser.add_argument(
+        "--input-file",
+        help="Process only the specified Excel file (relative to current directory)"
+    )
+    args = parser.parse_args()
+
+    # The user requested the default source directory be the current working directory
+    # Instead of the originally configured './test'
+    default_source_folder = os.getcwd()
+
+    # We will still use the original target_folder as defined above
+    # so the output location and naming remain the same.
+    # No changes to the existing 'target_folder' variable are needed.
+    # (We have already ensured target_folder directory exists above.)
+
+    if args.input_file:
+        # If an --input-file is specified, process only that one
+        input_path = os.path.join(default_source_folder, args.input_file)
+        if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
+            name, ext = os.path.splitext(os.path.basename(input_path))
+            save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
+            process_file(input_path, save_path)
+        else:
+            print(f"❌ File not found or invalid format: {input_path}")
+    else:
+        # If no --input-file argument is provided, process all .xlsx in the default_source_folder
+        for filename in os.listdir(default_source_folder):
+            if filename.endswith(".xlsx") and not filename.startswith("~$"):
+                full_path = os.path.join(default_source_folder, filename)
+                name, ext = os.path.splitext(filename)
+                save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
+                process_file(full_path, save_path)
+
+if __name__ == "__main__":
+    main()
