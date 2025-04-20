@@ -1,6 +1,4 @@
-# --------------------------------------------------------------------------------
 # /Users/chris/projects/heat-cycle-detection/src/hcd.py
-# --------------------------------------------------------------------------------
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,7 +24,26 @@ target_folder = "./test_done"   # You can modify as needed
 # Ensure that target folder exists
 os.makedirs(target_folder, exist_ok=True)
 
-def process_file(filepath, savepath):
+# --------------------------------------------------------------------------------
+# Added imports for PostgreSQL insertion
+import psycopg2
+import pytz
+
+def connect_to_postgres():
+    """
+    Connect to the PostgreSQL database using credentials from environment variables
+    and the .pgpass file for the password, as requested.
+    """
+    return psycopg2.connect(
+        host=os.getenv('PGHOST_2'),
+        database=os.getenv('PGDATABASE_2'),
+        user=os.getenv('PGUSER_2'),
+        password=None,  # psycopg2 will automatically use the password from ~/.pgpass
+        port=os.getenv('PGPORT_2')
+    )
+# --------------------------------------------------------------------------------
+
+def process_file(filepath, savepath, insert_db=False):
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -160,6 +177,77 @@ def process_file(filepath, savepath):
         discarded.to_excel(writer, sheet_name="Discarded", index=False)
     print(f"✅ Processed and saved: {savepath}")
 
+    # ----------------------------------------------------------------------------
+    # New logic to insert rows from "Heat Cleaned Data" (summary_df) into
+    # the `heating_device_data` table if --insert-db was specified.
+    # ----------------------------------------------------------------------------
+    if insert_db and not summary_df.empty:
+        print("ℹ️  Inserting data into 'heating_device_data' table...")
+        try:
+            conn = connect_to_postgres()
+            cur = conn.cursor()
+
+            # Time zone for the incoming "Date/Time On" column
+            detroit_tz = pytz.timezone("America/Detroit")
+
+            for _, row in summary_df.iterrows():
+                device_serial = str(row["MAC Serial #"])
+
+                # Convert local time to epoch (UTC), also store the timestamp
+                # 'Date/Time On' is column C in the original specification
+                # but in summary_df it is the same heading "Date/Time On"
+                detroit_time_on = detroit_tz.localize(row["Date/Time On"])
+                utc_time_on = detroit_time_on.astimezone(pytz.utc)
+                epoch_date_stamp = int(utc_time_on.timestamp())
+                date_stamp = utc_time_on.replace(tzinfo=None)  # naive UTC datetime
+
+                # Handle Enable => energy_saver_on (boolean)
+                energy_saver_on = bool(row["Enable"] == 1)
+
+                # "Heating On" => heating_on_minutes
+                heating_on_minutes = int(row["Heating On"])
+
+                # device_name => "Device Name" 
+                device_name = str(row["Device Name"])
+
+                # date_time_on => "Date/Time On"
+                date_time_on = row["Date/Time On"]
+
+                # date_time_off => "Date/Time Off"
+                date_time_off = row["Date/Time Off"]
+
+                # Insert row
+                insert_query = """
+                    INSERT INTO heating_device_data (
+                        device_serial, epoch_date_stamp, date_stamp,
+                        energy_saver_on, heating_on_minutes, device_name,
+                        date_time_on, date_time_off
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (device_serial, epoch_date_stamp) DO NOTHING
+                """
+                cur.execute(
+                    insert_query,
+                    (
+                        device_serial,
+                        epoch_date_stamp,
+                        date_stamp,
+                        energy_saver_on,
+                        heating_on_minutes,
+                        device_name,
+                        date_time_on,
+                        date_time_off
+                    )
+                )
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            print("✅ Data successfully inserted into 'heating_device_data'.")
+        except Exception as e:
+            print(f"❌ Failed to insert data into 'heating_device_data': {e}")
+    # ----------------------------------------------------------------------------
+
 def main():
     """
     Main entry point for the Heat Cycle Detection script.
@@ -174,16 +262,19 @@ def main():
         "--input-file",
         help="Process only the specified Excel file (relative to current directory)"
     )
+    # ----------------------------------------------------------------------------
+    # New argument to control database insertion
+    parser.add_argument(
+        "--insert-db",
+        action="store_true",
+        help="Insert the 'Heat Cleaned Data' rows into the heating_device_data table"
+    )
+    # ----------------------------------------------------------------------------
     args = parser.parse_args()
 
     # The user requested the default source directory be the current working directory
     # Instead of the originally configured './test'
     default_source_folder = os.getcwd()
-
-    # We will still use the original target_folder as defined above
-    # so the output location and naming remain the same.
-    # No changes to the existing 'target_folder' variable are needed.
-    # (We have already ensured target_folder directory exists above.)
 
     if args.input_file:
         # If an --input-file is specified, process only that one
@@ -191,7 +282,7 @@ def main():
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
             name, ext = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            process_file(input_path, save_path)
+            process_file(input_path, save_path, insert_db=args.insert_db)
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
@@ -201,7 +292,7 @@ def main():
                 full_path = os.path.join(default_source_folder, filename)
                 name, ext = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                process_file(full_path, save_path)
+                process_file(full_path, save_path, insert_db=args.insert_db)
 
 if __name__ == "__main__":
     main()
