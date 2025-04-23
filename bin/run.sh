@@ -1,6 +1,9 @@
 #!/bin/bash
 source ./source-venv.sh
-# input file comes from dir: test
-# output file written to dir: test_done
-#python src/hcd.py Butterfly\ MCD\ 8167\ D2\ ORS80646fffb17e_2504141146.xlsx 
-python src/hcd.py --input-file test/Butterfly\ MCD\ 8167\ P1\ ORSb0a732e61eba_2504141148.xlsx
+
+for i in ORSb0a732e6229e_2504191244 ORS80646fffb17e_2504191246 ORSb0a732e50022_2504191247 ORSb0a732e61eba_2504191248; do
+   # output file written to dir: test_done
+   echo "******** $i *********"
+   python src/hcd.py --input-file "downloads/${i}.xlsx" --insert-db --upsert
+   echo "*********************"
+done
