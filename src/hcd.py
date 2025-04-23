@@ -21,7 +21,7 @@ from openpyxl import load_workbook
 source_folder = "./test"        # You can modify as needed (overridden below in main())
 target_folder = "./test_done"   # You can modify as needed
 
-# Ensure that target folder exists
+# Ensure that target_folder exists
 os.makedirs(target_folder, exist_ok=True)
 
 # --------------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def connect_to_postgres():
     )
 # --------------------------------------------------------------------------------
 
-def process_file(filepath, savepath, insert_db=False):
+def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -208,12 +208,15 @@ def process_file(filepath, savepath, insert_db=False):
             # Time zone for the incoming "Date/Time On" column
             detroit_tz = pytz.timezone("America/Detroit")
 
-            # Step 2: Now insert rows into `heating_device_data`
+            # We'll track duplicates if we're in DO NOTHING mode (no upserts).
+            # If upserts=True, we won't skip duplicates; we'll update them.
+            duplicate_count = 0
+
+            # Insert or Upsert each row in summary_df
             for _, row in summary_df.iterrows():
                 device_serial = str(row["MAC Serial #"])
 
                 # Convert local time to epoch (UTC), also store the timestamp
-                # 'Date/Time On' is column C in the original specification
                 detroit_time_on = detroit_tz.localize(row["Date/Time On"])
                 utc_time_on = detroit_time_on.astimezone(pytz.utc)
                 epoch_date_stamp = int(utc_time_on.timestamp())
@@ -234,16 +237,38 @@ def process_file(filepath, savepath, insert_db=False):
                 # date_time_off => "Date/Time Off"
                 date_time_off = row["Date/Time Off"]
 
-                # Insert row
-                insert_query = """
-                    INSERT INTO heating_device_data (
-                        device_serial, epoch_date_stamp, date_stamp,
-                        energy_saver_on, heating_on_minutes, device_name,
-                        date_time_on, date_time_off
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (device_serial, epoch_date_stamp) DO NOTHING
-                """
+                # Build the appropriate INSERT ... ON CONFLICT clause
+                if do_upserts:
+                    insert_query = """
+                        INSERT INTO heating_device_data (
+                            device_serial, epoch_date_stamp, date_stamp,
+                            energy_saver_on, heating_on_minutes, device_name,
+                            date_time_on, date_time_off
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (device_serial, epoch_date_stamp)
+                        DO UPDATE SET
+                            date_stamp = EXCLUDED.date_stamp,
+                            energy_saver_on = EXCLUDED.energy_saver_on,
+                            heating_on_minutes = EXCLUDED.heating_on_minutes,
+                            device_name = EXCLUDED.device_name,
+                            date_time_on = EXCLUDED.date_time_on,
+                            date_time_off = EXCLUDED.date_time_off
+                        RETURNING device_serial
+                    """
+                else:
+                    insert_query = """
+                        INSERT INTO heating_device_data (
+                            device_serial, epoch_date_stamp, date_stamp,
+                            energy_saver_on, heating_on_minutes, device_name,
+                            date_time_on, date_time_off
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (device_serial, epoch_date_stamp)
+                        DO NOTHING
+                        RETURNING device_serial
+                    """
+
                 cur.execute(
                     insert_query,
                     (
@@ -257,10 +282,18 @@ def process_file(filepath, savepath, insert_db=False):
                         date_time_off
                     )
                 )
+                # If do_upserts is False, a conflict means RETURNING nothing => skip
+                result = cur.fetchone()
+                if not do_upserts and result is None:
+                    duplicate_count += 1
 
             conn.commit()
             cur.close()
             conn.close()
+
+            # If duplicates were skipped, inform the user
+            if not do_upserts and duplicate_count > 0:
+                print(f"⚠️  Skipped {duplicate_count} duplicate row(s) due to existing primary key.")
             print("✅ Data successfully inserted into 'heating_device_data'.")
         except Exception as e:
             print(f"❌ Failed to insert data into 'heating_device_data': {e}")
@@ -288,6 +321,13 @@ def main():
         help="Insert the 'Heat Cleaned Data' rows into the heating_device_data table"
     )
     # ----------------------------------------------------------------------------
+    # Additional argument to control upserts
+    parser.add_argument(
+        "--upserts",
+        action="store_true",
+        help="Perform upserts (INSERT ... ON CONFLICT DO UPDATE) instead of DO NOTHING"
+    )
+    # ----------------------------------------------------------------------------
     args = parser.parse_args()
 
     # The user requested the default source directory be the current working directory
@@ -300,7 +340,7 @@ def main():
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
             name, ext = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            process_file(input_path, save_path, insert_db=args.insert_db)
+            process_file(input_path, save_path, insert_db=args.insert_db, do_upserts=args.upserts)
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
@@ -310,7 +350,7 @@ def main():
                 full_path = os.path.join(default_source_folder, filename)
                 name, ext = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                process_file(full_path, save_path, insert_db=args.insert_db)
+                process_file(full_path, save_path, insert_db=args.insert_db, do_upserts=args.upserts)
 
 if __name__ == "__main__":
     main()
