@@ -178,24 +178,42 @@ def process_file(filepath, savepath, insert_db=False):
     print(f"✅ Processed and saved: {savepath}")
 
     # ----------------------------------------------------------------------------
-    # New logic to insert rows from "Heat Cleaned Data" (summary_df) into
-    # the `heating_device_data` table if --insert-db was specified.
+    # New logic to ensure the corresponding device_serial exists
+    # in the `heating_device` table before inserting any rows into
+    # `heating_device_data`.
     # ----------------------------------------------------------------------------
     if insert_db and not summary_df.empty:
         print("ℹ️  Inserting data into 'heating_device_data' table...")
+
+        # We expect only one device_serial in summary_df
+        unique_serials = summary_df["MAC Serial #"].unique()
+        if len(unique_serials) != 1:
+            print("❌ More than one distinct device_serial found in summary data. Aborting DB insertion.")
+            return
+        serial_for_device = str(unique_serials[0])
+
         try:
             conn = connect_to_postgres()
             cur = conn.cursor()
 
+            # Step 1: Ensure device_serial exists in the `heating_device` table
+            insert_device_query = """
+                INSERT INTO heating_device (device_serial)
+                VALUES (%s)
+                ON CONFLICT (device_serial) DO NOTHING
+            """
+            cur.execute(insert_device_query, (serial_for_device,))
+            conn.commit()
+
             # Time zone for the incoming "Date/Time On" column
             detroit_tz = pytz.timezone("America/Detroit")
 
+            # Step 2: Now insert rows into `heating_device_data`
             for _, row in summary_df.iterrows():
                 device_serial = str(row["MAC Serial #"])
 
                 # Convert local time to epoch (UTC), also store the timestamp
                 # 'Date/Time On' is column C in the original specification
-                # but in summary_df it is the same heading "Date/Time On"
                 detroit_time_on = detroit_tz.localize(row["Date/Time On"])
                 utc_time_on = detroit_time_on.astimezone(pytz.utc)
                 epoch_date_stamp = int(utc_time_on.timestamp())
@@ -207,7 +225,7 @@ def process_file(filepath, savepath, insert_db=False):
                 # "Heating On" => heating_on_minutes
                 heating_on_minutes = int(row["Heating On"])
 
-                # device_name => "Device Name" 
+                # device_name => "Device Name"
                 device_name = str(row["Device Name"])
 
                 # date_time_on => "Date/Time On"
