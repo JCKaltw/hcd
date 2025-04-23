@@ -1,4 +1,5 @@
 # /Users/chris/projects/heat-cycle-detection/src/hcd.py
+
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -133,6 +134,22 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
 
     df_filtered["Heating"] = heating_state
     df_filtered["Heating_Group"] = heating_group
+
+    # -------------------------------------------------------------------------
+    # Merged from hcd-002.py:
+    # Validate heating groups: 70% of rows must have Supply Temp >= Return Temp + 7
+    valid_groups = []
+    for gid in df_filtered["Heating_Group"].unique():
+        if gid == 0:
+            continue
+        group_rows = df_filtered[df_filtered["Heating_Group"] == gid]
+        valid_rows = (group_rows["Supply Temp/C"] >= group_rows["Return Temp/C"] + 7).sum()
+        if valid_rows / len(group_rows) >= 0.7:
+            valid_groups.append(gid)
+
+    # If a group fails the threshold check, mark it off
+    df_filtered.loc[~df_filtered["Heating_Group"].isin(valid_groups), ["Heating", "Heating_Group"]] = ["Off", 0]
+    # -------------------------------------------------------------------------
 
     # Extract heating group on/off times
     group_times = df_filtered[df_filtered["Heating_Group"] > 0].groupby("Heating_Group")["Date"].agg(["min", "max"]).reset_index()
