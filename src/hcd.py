@@ -144,7 +144,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
             continue
         group_rows = df_filtered[df_filtered["Heating_Group"] == gid]
         valid_rows = (group_rows["Supply Temp/C"] >= group_rows["Return Temp/C"] + 7).sum()
-        if valid_rows / len(group_rows) >= 0.7:
+        if valid_rows / len(group_rows) >= 0.6:
             valid_groups.append(gid)
 
     # If a group fails the threshold check, mark it off
