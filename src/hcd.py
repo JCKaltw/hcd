@@ -5,20 +5,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import timedelta
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill  # <-- Added from version1a
 # from google.colab import drive  # Removed for local usage
 
 # --------------------------------------------------------------------------------
-# The following lines were removed to eliminate Google Colab references:
-#
-# if not os.path.exists('/content/drive'):
-#     drive.mount('/content/drive', force_remount=True)
-#     print('Drive mounted')
-# else:
-#     print('Drive already mounted at /content/drive')
+# The following lines were removed to eliminate Google Colab references.
 # --------------------------------------------------------------------------------
 
 # Configuration
-# Changed to local folders instead of Google Drive paths.
 source_folder = "./test"        # You can modify as needed (overridden below in main())
 target_folder = "./test_done"   # You can modify as needed
 
@@ -26,7 +20,7 @@ target_folder = "./test_done"   # You can modify as needed
 os.makedirs(target_folder, exist_ok=True)
 
 # --------------------------------------------------------------------------------
-# Added imports for PostgreSQL insertion
+# Imports for PostgreSQL insertion
 import psycopg2
 import pytz
 
@@ -42,7 +36,6 @@ def connect_to_postgres():
         password=None,  # psycopg2 will automatically use the password from ~/.pgpass
         port=os.getenv('PGPORT_2')
     )
-# --------------------------------------------------------------------------------
 
 def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     xls = pd.ExcelFile(filepath)
@@ -99,7 +92,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     fill_cols = ["Device Name", "MAC Serial #", "Enable", "Disable", "Note"]
     df[fill_cols] = df[fill_cols].fillna(method="ffill")
 
-    # Save discarded rows (duplicates + newly null rows after merge)
+    # Save discarded rows
     discarded = pd.concat([duplicates, df[df.isnull().any(axis=1)]], ignore_index=True)
     df = df.dropna(subset=["State", "Supply Temp/C", "Return Temp/C"]).copy()
 
@@ -107,27 +100,41 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     df_filtered = df.copy()
     df_filtered["Date"] = pd.to_datetime(df_filtered["Date"])
     supply = df_filtered["Supply Temp/C"].values
+    return_temp = df_filtered["Return Temp/C"].values  # <-- needed for the new version1a logic
 
-    heating_state = []
-    heating_group = []
+    # ----------------------------------------------------------------------------
+    # Heating detection logic merged from version1a:
+    #   - threshold to turn ON: delta > 5, supply[i] > return_temp[i], not triggered before
+    #   - threshold to turn OFF: delta <= -2.7
+    #   - maintain a triggered_rows set
+    # ----------------------------------------------------------------------------
+    heating_state, heating_group = [], []
     in_heating = False
     group_id = 0
+    triggered_rows = set()
 
     for i in range(len(supply)):
         if i == 0:
             heating_state.append("Off")
             heating_group.append(0)
             continue
+
         delta = supply[i] - supply[i - 1]
-        if not in_heating and delta >= 5:
+        if (not in_heating
+            and delta > 5
+            and supply[i] > return_temp[i]
+            and i not in triggered_rows):
             in_heating = True
             group_id += 1
             heating_state.append("On")
             heating_group.append(group_id)
-        elif in_heating and delta <= -3:
+            triggered_rows.add(i)
+
+        elif in_heating and delta <= -2.7:
             in_heating = False
             heating_state.append("Off")
             heating_group.append(0)
+
         else:
             heating_state.append("On" if in_heating else "Off")
             heating_group.append(group_id if in_heating else 0)
@@ -135,9 +142,19 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     df_filtered["Heating"] = heating_state
     df_filtered["Heating_Group"] = heating_group
 
-    # -------------------------------------------------------------------------
-    # Merged from hcd-002.py:
-    # Validate heating groups: 70% of rows must have Supply Temp >= Return Temp + 7
+    # Extra debugging columns (from version1a)
+    df_filtered["Delta Supply"] = df_filtered["Supply Temp/C"].diff()
+    df_filtered["Delta Debug"] = df_filtered["Delta Supply"].apply(
+        lambda x: f"{x:.2f}" if pd.notnull(x) else ""
+    )
+    df_filtered["Trigger Debug"] = [
+        "TRIGGERED" if df_filtered.loc[i, "Delta Supply"] > 5 else ""
+        for i in range(len(df_filtered))
+    ]
+
+    # ----------------------------------------------------------------------------
+    # Validate heating groups (already updated to 0.6 in version2)
+    # ----------------------------------------------------------------------------
     valid_groups = []
     for gid in df_filtered["Heating_Group"].unique():
         if gid == 0:
@@ -147,9 +164,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
         if valid_rows / len(group_rows) >= 0.6:
             valid_groups.append(gid)
 
-    # If a group fails the threshold check, mark it off
     df_filtered.loc[~df_filtered["Heating_Group"].isin(valid_groups), ["Heating", "Heating_Group"]] = ["Off", 0]
-    # -------------------------------------------------------------------------
 
     # Extract heating group on/off times
     group_times = df_filtered[df_filtered["Heating_Group"] > 0].groupby("Heating_Group")["Date"].agg(["min", "max"]).reset_index()
@@ -169,8 +184,9 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     summaries = []
     for hour in sorted(set(heat_data_set["Date"].dt.floor("h"))):
         hour_data = heat_data_set[heat_data_set["Date"].dt.floor("h") == hour]
-        enable_count = pd.to_numeric(hour_data["Enable"], errors='coerce').fillna(0).astype(int).sum() if "Enable" in hour_data else 0
-        disable_count = pd.to_numeric(hour_data["Disable"], errors='coerce').fillna(0).astype(int).sum() if "Disable" in hour_data else 0
+        enable_count = pd.to_numeric(hour_data["Enable"], errors='coerce').fillna(0).astype(int).sum()
+        disable_count = pd.to_numeric(hour_data["Disable"], errors='coerce').fillna(0).astype(int).sum()
+
         if enable_count >= 55 or disable_count >= 55:
             summaries.append({
                 "Device Name": hour_data["Device Name"].iloc[0],
@@ -185,24 +201,44 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
     summary_df = pd.DataFrame(summaries)
     print("Summary Rows:", len(summary_df))
 
-    # Save outputs
+    # Save outputs (initial save)
     with pd.ExcelWriter(savepath, engine='openpyxl') as writer:
         original_df.to_excel(writer, sheet_name="Original Data", index=False)
         df.to_excel(writer, sheet_name="Filtered Test Run", index=False)
         heat_data_set.to_excel(writer, sheet_name="Heating Data Set", index=False)
         summary_df.to_excel(writer, sheet_name="Heat Cleaned Data", index=False)
         discarded.to_excel(writer, sheet_name="Discarded", index=False)
+
     print(f"✅ Processed and saved: {savepath}")
 
     # ----------------------------------------------------------------------------
-    # New logic to ensure the corresponding device_serial exists
-    # in the `heating_device` table before inserting any rows into
-    # `heating_device_data`.
+    # version1a's highlighting logic
+    # ----------------------------------------------------------------------------
+    wb = load_workbook(savepath)
+    ws = wb["Filtered Test Run"]
+
+    light_orange_fill = PatternFill(start_color="FFD8B1", end_color="FFD8B1", fill_type="solid")
+
+    # Find column letters for relevant headers
+    headers = {cell.value: cell.column_letter for cell in ws[1]}
+    supply_col = headers.get("Supply Temp/C")
+    heating_col = headers.get("Heating")
+
+    # Highlight cells in "Filtered Test Run" where Heating == "On"
+    for row in range(2, ws.max_row + 1):
+        if ws[f"{heating_col}{row}"].value == "On":
+            if supply_col:
+                ws[f"{supply_col}{row}"].fill = light_orange_fill
+            ws[f"{heating_col}{row}"].fill = light_orange_fill
+
+    wb.save(savepath)
+
+    # ----------------------------------------------------------------------------
+    # Insert data into the DB if requested
     # ----------------------------------------------------------------------------
     if insert_db and not summary_df.empty:
         print("ℹ️  Inserting data into 'heating_device_data' table...")
 
-        # We expect only one device_serial in summary_df
         unique_serials = summary_df["MAC Serial #"].unique()
         if len(unique_serials) != 1:
             print("❌ More than one distinct device_serial found in summary data. Aborting DB insertion.")
@@ -222,39 +258,24 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
             cur.execute(insert_device_query, (serial_for_device,))
             conn.commit()
 
-            # Time zone for the incoming "Date/Time On" column
             detroit_tz = pytz.timezone("America/Detroit")
-
-            # We'll track duplicates if we're in DO NOTHING mode (no upserts).
-            # If upserts=True, we won't skip duplicates; we'll update them.
             duplicate_count = 0
 
-            # Insert or Upsert each row in summary_df
             for _, row in summary_df.iterrows():
                 device_serial = str(row["MAC Serial #"])
 
-                # Convert local time to epoch (UTC), also store the timestamp
+                # Convert local time to epoch UTC
                 detroit_time_on = detroit_tz.localize(row["Date/Time On"])
                 utc_time_on = detroit_time_on.astimezone(pytz.utc)
                 epoch_date_stamp = int(utc_time_on.timestamp())
-                date_stamp = utc_time_on.replace(tzinfo=None)  # naive UTC datetime
+                date_stamp = utc_time_on.replace(tzinfo=None)
 
-                # Handle Enable => energy_saver_on (boolean)
                 energy_saver_on = bool(row["Enable"] == 1)
-
-                # "Heating On" => heating_on_minutes
                 heating_on_minutes = int(row["Heating On"])
-
-                # device_name => "Device Name"
                 device_name = str(row["Device Name"])
-
-                # date_time_on => "Date/Time On"
                 date_time_on = row["Date/Time On"]
-
-                # date_time_off => "Date/Time Off"
                 date_time_off = row["Date/Time Off"]
 
-                # Build the appropriate INSERT ... ON CONFLICT clause
                 if do_upserts:
                     insert_query = """
                         INSERT INTO heating_device_data (
@@ -299,7 +320,6 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
                         date_time_off
                     )
                 )
-                # If do_upserts is False, a conflict means RETURNING nothing => skip
                 result = cur.fetchone()
                 if not do_upserts and result is None:
                     duplicate_count += 1
@@ -308,13 +328,11 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
             cur.close()
             conn.close()
 
-            # If duplicates were skipped, inform the user
             if not do_upserts and duplicate_count > 0:
                 print(f"⚠️  Skipped {duplicate_count} duplicate row(s) due to existing primary key.")
             print("✅ Data successfully inserted into 'heating_device_data'.")
         except Exception as e:
             print(f"❌ Failed to insert data into 'heating_device_data': {e}")
-    # ----------------------------------------------------------------------------
 
 def main():
     """
@@ -330,25 +348,18 @@ def main():
         "--input-file",
         help="Process only the specified Excel file (relative to current directory)"
     )
-    # ----------------------------------------------------------------------------
-    # New argument to control database insertion
     parser.add_argument(
         "--insert-db",
         action="store_true",
         help="Insert the 'Heat Cleaned Data' rows into the heating_device_data table"
     )
-    # ----------------------------------------------------------------------------
-    # Additional argument to control upserts
     parser.add_argument(
         "--upserts",
         action="store_true",
         help="Perform upserts (INSERT ... ON CONFLICT DO UPDATE) instead of DO NOTHING"
     )
-    # ----------------------------------------------------------------------------
     args = parser.parse_args()
 
-    # The user requested the default source directory be the current working directory
-    # Instead of the originally configured './test'
     default_source_folder = os.getcwd()
 
     if args.input_file:
