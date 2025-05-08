@@ -1,9 +1,10 @@
 # /Users/chris/projects/heat-cycle-detection/src/hcd.py
 
 import os
+import sys
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import timedelta
+from datetime import timedelta, datetime
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill  # <-- Added from version1a
 # from google.colab import drive  # Removed for local usage
@@ -37,7 +38,7 @@ def connect_to_postgres():
         port=os.getenv('PGPORT_2')
     )
 
-def process_file(filepath, savepath, insert_db=False, do_upserts=False):
+def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=False):
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -245,94 +246,103 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False):
             return
         serial_for_device = str(unique_serials[0])
 
-        try:
-            conn = connect_to_postgres()
-            cur = conn.cursor()
+        insert_device_query = """
+            INSERT INTO heating_device (device_serial)
+            VALUES (%s)
+            ON CONFLICT (device_serial) DO NOTHING
+        """
 
-            # Step 1: Ensure device_serial exists in the `heating_device` table
-            insert_device_query = """
-                INSERT INTO heating_device (device_serial)
-                VALUES (%s)
-                ON CONFLICT (device_serial) DO NOTHING
-            """
-            cur.execute(insert_device_query, (serial_for_device,))
-            conn.commit()
+        if dry_run:
+            print(f"Dry run: would execute SQL:\n{insert_device_query.strip()}\nwith parameters ({serial_for_device},)")
+        else:
+            try:
+                conn = connect_to_postgres()
+                cur = conn.cursor()
+                cur.execute(insert_device_query, (serial_for_device,))
+                conn.commit()
+            except Exception as e:
+                print(f"❌ Failed to insert device into 'heating_device': {e}")
+                return
 
-            detroit_tz = pytz.timezone("America/Detroit")
-            duplicate_count = 0
+        detroit_tz = pytz.timezone("America/Detroit")
+        duplicate_count = 0
 
-            for _, row in summary_df.iterrows():
-                device_serial = str(row["MAC Serial #"])
+        for _, row in summary_df.iterrows():
+            device_serial = str(row["MAC Serial #"])
 
-                # Convert local time to epoch UTC
-                detroit_time_on = detroit_tz.localize(row["Date/Time On"])
-                utc_time_on = detroit_time_on.astimezone(pytz.utc)
-                epoch_date_stamp = int(utc_time_on.timestamp())
-                date_stamp = utc_time_on.replace(tzinfo=None)
+            # Convert local time to epoch UTC
+            detroit_time_on = detroit_tz.localize(row["Date/Time On"])
+            utc_time_on = detroit_time_on.astimezone(pytz.utc)
+            epoch_date_stamp = int(utc_time_on.timestamp())
+            date_stamp = utc_time_on.replace(tzinfo=None)
 
-                energy_saver_on = bool(row["Enable"] == 1)
-                heating_on_minutes = int(row["Heating On"])
-                device_name = str(row["Device Name"])
-                date_time_on = row["Date/Time On"]
-                date_time_off = row["Date/Time Off"]
+            energy_saver_on = bool(row["Enable"] == 1)
+            heating_on_minutes = int(row["Heating On"])
+            device_name = str(row["Device Name"])
+            date_time_on = row["Date/Time On"]
+            date_time_off = row["Date/Time Off"]
 
-                if do_upserts:
-                    insert_query = """
-                        INSERT INTO heating_device_data (
-                            device_serial, epoch_date_stamp, date_stamp,
-                            energy_saver_on, heating_on_minutes, device_name,
-                            date_time_on, date_time_off
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (device_serial, epoch_date_stamp)
-                        DO UPDATE SET
-                            date_stamp = EXCLUDED.date_stamp,
-                            energy_saver_on = EXCLUDED.energy_saver_on,
-                            heating_on_minutes = EXCLUDED.heating_on_minutes,
-                            device_name = EXCLUDED.device_name,
-                            date_time_on = EXCLUDED.date_time_on,
-                            date_time_off = EXCLUDED.date_time_off
-                        RETURNING device_serial
-                    """
-                else:
-                    insert_query = """
-                        INSERT INTO heating_device_data (
-                            device_serial, epoch_date_stamp, date_stamp,
-                            energy_saver_on, heating_on_minutes, device_name,
-                            date_time_on, date_time_off
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (device_serial, epoch_date_stamp)
-                        DO NOTHING
-                        RETURNING device_serial
-                    """
-
-                cur.execute(
-                    insert_query,
-                    (
-                        device_serial,
-                        epoch_date_stamp,
-                        date_stamp,
-                        energy_saver_on,
-                        heating_on_minutes,
-                        device_name,
-                        date_time_on,
-                        date_time_off
+            if do_upserts:
+                insert_query = """
+                    INSERT INTO heating_device_data (
+                        device_serial, epoch_date_stamp, date_stamp,
+                        energy_saver_on, heating_on_minutes, device_name,
+                        date_time_on, date_time_off
                     )
-                )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (device_serial, epoch_date_stamp)
+                    DO UPDATE SET
+                        date_stamp = EXCLUDED.date_stamp,
+                        energy_saver_on = EXCLUDED.energy_saver_on,
+                        heating_on_minutes = EXCLUDED.heating_on_minutes,
+                        device_name = EXCLUDED.device_name,
+                        date_time_on = EXCLUDED.date_time_on,
+                        date_time_off = EXCLUDED.date_time_off
+                    RETURNING device_serial
+                """
+            else:
+                insert_query = """
+                    INSERT INTO heating_device_data (
+                        device_serial, epoch_date_stamp, date_stamp,
+                        energy_saver_on, heating_on_minutes, device_name,
+                        date_time_on, date_time_off
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (device_serial, epoch_date_stamp)
+                    DO NOTHING
+                    RETURNING device_serial
+                """
+
+            params = (
+                device_serial,
+                epoch_date_stamp,
+                date_stamp,
+                energy_saver_on,
+                heating_on_minutes,
+                device_name,
+                date_time_on,
+                date_time_off
+            )
+
+            if dry_run:
+                print(f"Dry run: would execute SQL:\n{insert_query.strip()}\nwith parameters {params}")
+            else:
+                cur.execute(insert_query, params)
                 result = cur.fetchone()
                 if not do_upserts and result is None:
                     duplicate_count += 1
 
-            conn.commit()
-            cur.close()
-            conn.close()
+        if dry_run:
+            print("Dry run complete. No changes were made to the database.")
+            return
 
-            if not do_upserts and duplicate_count > 0:
-                print(f"⚠️  Skipped {duplicate_count} duplicate row(s) due to existing primary key.")
-            print("✅ Data successfully inserted into 'heating_device_data'.")
-        except Exception as e:
-            print(f"❌ Failed to insert data into 'heating_device_data': {e}")
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if not do_upserts and duplicate_count > 0:
+            print(f"⚠️  Skipped {duplicate_count} duplicate row(s) due to existing primary key.")
+        print("✅ Data successfully inserted into 'heating_device_data'.")
 
 def main():
     """
@@ -358,7 +368,31 @@ def main():
         action="store_true",
         help="Perform upserts (INSERT ... ON CONFLICT DO UPDATE) instead of DO NOTHING"
     )
+    parser.add_argument(
+        "--logging",
+        action="store_true",
+        help="Enable logging to files in ./logs"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Display SQL statements without executing inserts/updates"
+    )
     args = parser.parse_args()
+
+    # Setup logging redirection if requested
+    if args.logging:
+        now = datetime.now()
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-4]
+        logs_dir = os.path.join(os.getcwd(), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        out_log_path = os.path.join(logs_dir, f"{now_str}.out.log")
+        err_log_path = os.path.join(logs_dir, f"{now_str}.err.log")
+        out_f = open(out_log_path, 'w')
+        err_f = open(err_log_path, 'w')
+        sys.stdout = out_f
+        sys.stderr = err_f
+        print(f"Logging to {out_log_path} (stdout) and {err_log_path} (stderr)", file=sys.stderr)
 
     default_source_folder = os.getcwd()
 
@@ -368,7 +402,13 @@ def main():
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
             name, ext = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            process_file(input_path, save_path, insert_db=args.insert_db, do_upserts=args.upserts)
+            process_file(
+                input_path,
+                save_path,
+                insert_db=args.insert_db,
+                do_upserts=args.upserts,
+                dry_run=args.dry_run
+            )
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
@@ -378,7 +418,13 @@ def main():
                 full_path = os.path.join(default_source_folder, filename)
                 name, ext = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                process_file(full_path, save_path, insert_db=args.insert_db, do_upserts=args.upserts)
+                process_file(
+                    full_path,
+                    save_path,
+                    insert_db=args.insert_db,
+                    do_upserts=args.upserts,
+                    dry_run=args.dry_run
+                )
 
 if __name__ == "__main__":
     main()

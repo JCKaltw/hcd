@@ -1,9 +1,24 @@
 #!/bin/bash
 source ./source-venv.sh
 
-for i in ORSb0a732e6229e_2504191244 ORS80646fffb17e_2504191246 ORSb0a732e50022_2504191247 ORSb0a732e61eba_2504191248; do
+IDIR="downloads"
+
+for i in $IDIR/ORSb0a732e6229e_* $IDIR/ORS80646fffb17e_* $IDIR/ORSb0a732e50022_* $IDIR/ORSb0a732e61eba_*; do
    # output file written to dir: test_done
    echo "******** $i *********"
-   python src/hcd.py --input-file "downloads/${i}.xlsx" --insert-db --upsert
+   echo "python src/hcd.py \\"
+   echo "    --input-file \"$i\" \\"
+   echo "    --insert-db \\"
+   echo "    --upsert \\"
+   echo "    --dry-run \\"
+   echo "    --logging"
+
+   python src/hcd.py \
+      --input-file "$i" \
+      --insert-db \
+      --upsert \
+      --dry-run \
+      --logging
+
    echo "*********************"
 done
