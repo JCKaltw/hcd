@@ -21,9 +21,12 @@ target_folder = "./test_done"   # You can modify as needed
 os.makedirs(target_folder, exist_ok=True)
 
 # --------------------------------------------------------------------------------
-# Imports for PostgreSQL insertion
+# Imports for PostgreSQL insertion and JSON output
 import psycopg2
 import pytz
+import json
+
+# --------------------------------------------------------------------------------
 
 def connect_to_postgres():
     """
@@ -38,7 +41,13 @@ def connect_to_postgres():
         port=os.getenv('PGPORT_2')
     )
 
+
 def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=False):
+    # Initialize counters for this file
+    summary_rows_count = 0
+    heating_devices_count = 0
+    heating_device_readings_count = 0
+
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -55,10 +64,10 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             df = df[df["Note"] == "Test Run"].copy()
         else:
             print(f"❌ 'Note' column not found after renaming in: {filepath}")
-            return
+            return 0, 0, 0
     else:
         print(f"❌ Not enough columns to rename 7th column to 'Note' in: {filepath}")
-        return
+        return 0, 0, 0
 
     # Insert "Device Name" and "MAC Serial #"
     device_name = raw_df.iloc[0, 1]
@@ -177,7 +186,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     df["Date"] = pd.to_datetime(df["Date"])
     df = pd.merge(df, df_filtered[["Date", "Heating", "Heating_Group"]], on="Date", how="left")
     df["Heating"] = df["Heating"].fillna("Off")
-    df["Heating_Group"] = df["Heating_Group"].fillna(0).astype(int)
+    df["Heating_GROUP"] = df["Heating_Group"].fillna(0).astype(int)
     df["Hour"] = df["Date"].dt.floor("h")
     heat_data_set = df[df["Hour"].isin(df_filtered[df_filtered["Heating"] == "On"]["Hour"].unique())].copy()
 
@@ -200,7 +209,8 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             })
 
     summary_df = pd.DataFrame(summaries)
-    print("Summary Rows:", len(summary_df))
+    summary_rows_count = len(summary_df)
+    print("Summary Rows:", summary_rows_count)
 
     # Save outputs (initial save)
     with pd.ExcelWriter(savepath, engine='openpyxl') as writer:
@@ -238,21 +248,23 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     # Insert data into the DB if requested
     # ----------------------------------------------------------------------------
     if insert_db and not summary_df.empty:
-        print("ℹ️  Inserting data into 'heating_device_data' table...")
-
+        print("ℹ️  Inserting device into 'heating_device'... this may be skipped if dry-run or conflict")
         unique_serials = summary_df["MAC Serial #"].unique()
+
         if len(unique_serials) != 1:
             print("❌ More than one distinct device_serial found in summary data. Aborting DB insertion.")
-            return
-        serial_for_device = str(unique_serials[0])
+            return summary_rows_count, heating_devices_count, heating_device_readings_count
 
+        serial_for_device = str(unique_serials[0])
         insert_device_query = """
             INSERT INTO heating_device (device_serial)
             VALUES (%s)
             ON CONFLICT (device_serial) DO NOTHING
         """
 
+        # Execute or dry-run device insert
         if dry_run:
+            heating_devices_count = len(unique_serials)
             print(f"Dry run: would execute SQL:\n{insert_device_query.strip()}\nwith parameters ({serial_for_device},)")
         else:
             try:
@@ -260,12 +272,14 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
                 cur = conn.cursor()
                 cur.execute(insert_device_query, (serial_for_device,))
                 conn.commit()
+                heating_devices_count = len(unique_serials)
             except Exception as e:
                 print(f"❌ Failed to insert device into 'heating_device': {e}")
-                return
+                return summary_rows_count, heating_devices_count, heating_device_readings_count
 
         detroit_tz = pytz.timezone("America/Detroit")
-        duplicate_count = 0
+        # Count reading insert attempts
+        heating_device_readings_count = len(summary_df)
 
         for _, row in summary_df.iterrows():
             device_serial = str(row["MAC Serial #"])
@@ -328,21 +342,20 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
                 print(f"Dry run: would execute SQL:\n{insert_query.strip()}\nwith parameters {params}")
             else:
                 cur.execute(insert_query, params)
-                result = cur.fetchone()
-                if not do_upserts and result is None:
-                    duplicate_count += 1
+                # result fetched but we count all attempts uniformly
 
-        if dry_run:
-            print("Dry run complete. No changes were made to the database.")
-            return
+        if not dry_run:
+            conn.commit()
+            cur.close()
+            conn.close()
 
-        conn.commit()
-        cur.close()
-        conn.close()
+        if not do_upserts and heating_device_readings_count > 0:
+            print(f"⚠️  Completed inserts with potential duplicates skipped by ON CONFLICT.")
+        print("✅ Data insertion complete.")
 
-        if not do_upserts and duplicate_count > 0:
-            print(f"⚠️  Skipped {duplicate_count} duplicate row(s) due to existing primary key.")
-        print("✅ Data successfully inserted into 'heating_device_data'.")
+    # Return counters for JSON summary
+    return summary_rows_count, heating_devices_count, heating_device_readings_count
+
 
 def main():
     """
@@ -380,6 +393,9 @@ def main():
     )
     args = parser.parse_args()
 
+    # Capture original stdout to ensure JSON summary always goes there
+    orig_stdout = sys.stdout
+
     # Setup logging redirection if requested
     if args.logging:
         now = datetime.now()
@@ -394,37 +410,56 @@ def main():
         sys.stderr = err_f
         print(f"Logging to {out_log_path} (stdout) and {err_log_path} (stderr)", file=sys.stderr)
 
+    # Initialize aggregate counters
+    total_summary_rows = 0
+    total_heating_devices = 0
+    total_heating_readings = 0
+
     default_source_folder = os.getcwd()
 
     if args.input_file:
-        # If an --input-file is specified, process only that one
         input_path = os.path.join(default_source_folder, args.input_file)
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
-            name, ext = os.path.splitext(os.path.basename(input_path))
+            name, _ = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            process_file(
+            summary, dev_count, read_count = process_file(
                 input_path,
                 save_path,
                 insert_db=args.insert_db,
                 do_upserts=args.upserts,
                 dry_run=args.dry_run
             )
+            total_summary_rows += summary
+            total_heating_devices += dev_count
+            total_heating_readings += read_count
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
-        # If no --input-file argument is provided, process all .xlsx in the default_source_folder
         for filename in os.listdir(default_source_folder):
             if filename.endswith(".xlsx") and not filename.startswith("~$"):
                 full_path = os.path.join(default_source_folder, filename)
-                name, ext = os.path.splitext(filename)
+                name, _ = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                process_file(
+                summary, dev_count, read_count = process_file(
                     full_path,
                     save_path,
                     insert_db=args.insert_db,
                     do_upserts=args.upserts,
                     dry_run=args.dry_run
                 )
+                total_summary_rows += summary
+                total_heating_devices += dev_count
+                total_heating_readings += read_count
+
+    # Output JSON summary regardless of logging
+    mode = "dry-run" if args.dry_run else "live-run"
+    summary_obj = {
+        "mode": mode,
+        "summary-rows": total_summary_rows,
+        "heating-devices": total_heating_devices,
+        "heating-device-readings": total_heating_readings
+    }
+    orig_stdout.write(json.dumps(summary_obj) + "\n")
 
 if __name__ == "__main__":
     main()
