@@ -47,6 +47,8 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     summary_rows_count = 0
     heating_devices_count = 0
     heating_device_readings_count = 0
+    # Initialize list to store heating device info for JSON output
+    heating_serial_devices = []
 
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
@@ -64,10 +66,10 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             df = df[df["Note"] == "Test Run"].copy()
         else:
             print(f"❌ 'Note' column not found after renaming in: {filepath}")
-            return 0, 0, 0
+            return 0, 0, 0, []
     else:
         print(f"❌ Not enough columns to rename 7th column to 'Note' in: {filepath}")
-        return 0, 0, 0
+        return 0, 0, 0, []
 
     # Insert "Device Name" and "MAC Serial #"
     device_name = raw_df.iloc[0, 1]
@@ -253,29 +255,57 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
 
         if len(unique_serials) != 1:
             print("❌ More than one distinct device_serial found in summary data. Aborting DB insertion.")
-            return summary_rows_count, heating_devices_count, heating_device_readings_count
+            return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
 
         serial_for_device = str(unique_serials[0])
         insert_device_query = """
             INSERT INTO heating_device (device_serial)
             VALUES (%s)
             ON CONFLICT (device_serial) DO NOTHING
+            RETURNING device_id, device_serial
         """
 
         # Execute or dry-run device insert
         if dry_run:
             heating_devices_count = len(unique_serials)
             print(f"Dry run: would execute SQL:\n{insert_device_query.strip()}\nwith parameters ({serial_for_device},)")
+            # Add a mock device entry for dry run
+            heating_serial_devices.append({
+                "device_id": 0,  # Placeholder ID for dry run
+                "device_serial": serial_for_device
+            })
         else:
             try:
                 conn = connect_to_postgres()
                 cur = conn.cursor()
                 cur.execute(insert_device_query, (serial_for_device,))
-                conn.commit()
-                heating_devices_count = len(unique_serials)
+                
+                # Get the device_id from the RETURNING clause
+                device_result = cur.fetchone()
+                
+                # If a row was returned, a new device was inserted
+                # Otherwise, we need to query for the existing device_id
+                if device_result:
+                    device_id, device_serial = device_result
+                    heating_serial_devices.append({
+                        "device_id": device_id,
+                        "device_serial": device_serial
+                    })
+                    heating_devices_count = 1
+                else:
+                    # Query to get the device_id for the existing device
+                    cur.execute("SELECT device_id, device_serial FROM heating_device WHERE device_serial = %s", 
+                                (serial_for_device,))
+                    device_id, device_serial = cur.fetchone()
+                    heating_serial_devices.append({
+                        "device_id": device_id,
+                        "device_serial": device_serial
+                    })
+                    heating_devices_count = 1
+                
             except Exception as e:
                 print(f"❌ Failed to insert device into 'heating_device': {e}")
-                return summary_rows_count, heating_devices_count, heating_device_readings_count
+                return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
 
         detroit_tz = pytz.timezone("America/Detroit")
         # Count reading insert attempts
@@ -354,7 +384,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
         print("✅ Data insertion complete.")
 
     # Return counters for JSON summary
-    return summary_rows_count, heating_devices_count, heating_device_readings_count
+    return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
 
 
 def main():
@@ -414,6 +444,8 @@ def main():
     total_summary_rows = 0
     total_heating_devices = 0
     total_heating_readings = 0
+    # Initialize list to collect all heating device entries
+    all_heating_serial_devices = []
 
     default_source_folder = os.getcwd()
 
@@ -422,7 +454,7 @@ def main():
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
             name, _ = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            summary, dev_count, read_count = process_file(
+            summary, dev_count, read_count, devices = process_file(
                 input_path,
                 save_path,
                 insert_db=args.insert_db,
@@ -432,6 +464,7 @@ def main():
             total_summary_rows += summary
             total_heating_devices += dev_count
             total_heating_readings += read_count
+            all_heating_serial_devices.extend(devices)
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
@@ -440,7 +473,7 @@ def main():
                 full_path = os.path.join(default_source_folder, filename)
                 name, _ = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                summary, dev_count, read_count = process_file(
+                summary, dev_count, read_count, devices = process_file(
                     full_path,
                     save_path,
                     insert_db=args.insert_db,
@@ -450,6 +483,7 @@ def main():
                 total_summary_rows += summary
                 total_heating_devices += dev_count
                 total_heating_readings += read_count
+                all_heating_serial_devices.extend(devices)
 
     # Output JSON summary regardless of logging
     mode = "dry-run" if args.dry_run else "live-run"
@@ -457,7 +491,8 @@ def main():
         "mode": mode,
         "summary-rows": total_summary_rows,
         "heating-devices": total_heating_devices,
-        "heating-device-readings": total_heating_readings
+        "heating-device-readings": total_heating_readings,
+        "heating-serial-devices": all_heating_serial_devices
     }
     orig_stdout.write(json.dumps(summary_obj) + "\n")
 

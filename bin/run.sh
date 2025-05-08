@@ -17,7 +17,6 @@ for i in $IDIR/ORSb0a732e6229e_* $IDIR/ORS80646fffb17e_* $IDIR/ORSb0a732e50022_*
       --input-file "$i" \
       --insert-db \
       --upsert \
-      --dry-run \
       --logging
 
    echo "*********************"
