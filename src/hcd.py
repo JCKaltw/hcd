@@ -161,7 +161,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     )
     df_filtered["Trigger Debug"] = [
         "TRIGGERED" if df_filtered.loc[i, "Delta Supply"] > 5 else ""
-        for i in range(len(df_filtered))
+        for i in df_filtered.index
     ]
 
     # ----------------------------------------------------------------------------
