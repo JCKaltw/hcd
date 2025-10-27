@@ -28,6 +28,44 @@ import json
 
 # --------------------------------------------------------------------------------
 
+def hex_upper(serial: str) -> str:
+    """
+    Normalize MAC serial number to consistent format:
+    - Lowercase 0x prefix (if already present)
+    - Uppercase hex digits
+    - Do NOT add prefix if it doesn't exist
+
+    Examples:
+        a34f -> A34F
+        0Xa34f -> 0xA34F
+        0xa34f -> 0xA34F
+        B0A732E4DA4A -> B0A732E4DA4A
+        b0a732e61eba -> B0A732E61EBA
+
+    Args:
+        serial: Raw serial number string
+
+    Returns:
+        Normalized serial number (with or without 0x prefix based on input)
+    """
+    if not serial or not isinstance(serial, str):
+        return serial
+
+    # Strip whitespace
+    serial = serial.strip()
+
+    # Check for 0x or 0X prefix
+    has_prefix = serial.lower().startswith('0x')
+
+    if has_prefix:
+        # Has prefix: normalize to lowercase 0x + uppercase hex
+        hex_part = serial[2:].upper()
+        return f"0x{hex_part}"
+    else:
+        # No prefix: just uppercase the hex digits
+        return serial.upper()
+
+
 def connect_to_postgres():
     """
     Connect to the PostgreSQL database using credentials from environment variables
@@ -74,6 +112,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     # Insert "Device Name" and "MAC Serial #"
     device_name = raw_df.iloc[0, 1]
     mac_serial = str(raw_df.iloc[1, 0]).replace("DevID: ", "")
+    mac_serial = hex_upper(mac_serial)  # Normalize serial number format
     df["Device Name"] = device_name
     df["MAC Serial #"] = mac_serial
     cols = ["Device Name", "MAC Serial #"] + [col for col in df.columns if col not in ["Device Name", "MAC Serial #"]]
@@ -258,6 +297,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
 
         serial_for_device = str(unique_serials[0])
+        serial_for_device = hex_upper(serial_for_device)  # Normalize serial number format
         insert_device_query = """
             INSERT INTO heating_device (device_serial)
             VALUES (%s)
@@ -313,6 +353,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
 
         for _, row in summary_df.iterrows():
             device_serial = str(row["MAC Serial #"])
+            device_serial = hex_upper(device_serial)  # Normalize serial number format
 
             # Convert local time to epoch UTC
             detroit_time_on = detroit_tz.localize(row["Date/Time On"])
