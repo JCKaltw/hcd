@@ -38,15 +38,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Update heating_device table
+-- Temporarily disable foreign key constraint to allow serial updates
+ALTER TABLE heating_device_data DROP CONSTRAINT IF EXISTS heating_device_data_device_serial_fkey;
+
+-- Update heating_device_data table FIRST (child table)
+UPDATE heating_device_data
+SET device_serial = hex_upper(device_serial)
+WHERE device_serial != hex_upper(device_serial);
+
+-- Update heating_device table SECOND (parent table)
 UPDATE heating_device
 SET device_serial = hex_upper(device_serial)
 WHERE device_serial != hex_upper(device_serial);
 
--- Update heating_device_data table
-UPDATE heating_device_data
-SET device_serial = hex_upper(device_serial)
-WHERE device_serial != hex_upper(device_serial);
+-- Re-enable foreign key constraint
+ALTER TABLE heating_device_data
+ADD CONSTRAINT heating_device_data_device_serial_fkey
+FOREIGN KEY (device_serial)
+REFERENCES heating_device(device_serial);
 
 -- Show results after normalization
 SELECT 'AFTER NORMALIZATION:' as status;
