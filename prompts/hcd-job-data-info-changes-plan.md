@@ -227,6 +227,8 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
   originalFileName: "ORS80646f047032_2510271855-RTU23.xlsx",
   destinationPath: "/path/to/uploads/20251027_225619_MC45MDU3.xlsx",
   devices: [],                                     // ← NEW: Complete device array
+  statusReportPath: null,                          // ← NEW: Path to device status report (*-results.xlsx)
+  heatAnalysisPath: null,                          // ← NEW: Path to heat analysis workbook (*_heat min per hour.xlsx)
   resultJSON: {
     mode: "live-run",
     summary-rows: 0,
@@ -250,6 +252,8 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
       device_serial: "80646F049736"
     }
   ],
+  statusReportPath: "/path/to/upload-results/20251027_130410_MC40MTQw-results.xlsx",  // ← NEW
+  heatAnalysisPath: "/path/to/test_done/20251027_130410_MC40MTQw_heat min per hour.xlsx",  // ← NEW
   resultJSON: {
     mode: "live-run",
     summary-rows: 30,
@@ -267,8 +271,32 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
 - [x] **Consistent File Paths** - `destinationPath` always matches actual file
 - [x] **Complete Device Information** - All devices accessible at top level
 - [x] **Self-Referencing** - Job ID included in data for easy correlation
+- [x] **Downloadable Reports** - Direct paths to status reports and heat analysis files for PGUI download links
 - [x] **Backward Compatible** - `resultJSON` structure unchanged
 - [x] **Simplified Troubleshooting** - Single source of truth for all job information
+
+### 4.3 File Paths for PGUI Downloads
+
+The PGUI will be able to provide download links for generated files using the stored paths:
+
+**1. Device Status Report** (`statusReportPath`):
+- Location: `upload-results/` directory
+- Filename: `{input_basename}-results.xlsx`
+- Content: Vertical format diagnostic report with temperature statistics and validation failures
+- Available: Always (for every processed file)
+
+**2. Heat Analysis Workbook** (`heatAnalysisPath`):
+- Location: `test_done/` directory
+- Filename: `{input_basename}_heat min per hour.xlsx`
+- Content: Multi-sheet workbook with 5 sheets (Original Data, Filtered Test Run, Heating Data Set, Heat Cleaned Data, Discarded)
+- Available: Always (created even for 0 summary rows)
+
+**Path Extraction from hcd.py Output:**
+
+The Python script already generates these files with predictable naming patterns. The bullWorker.js will need to:
+1. Construct the expected file paths based on input filename
+2. Verify files exist
+3. Store absolute paths in job data
 
 ---
 
@@ -381,6 +409,7 @@ if (Array.isArray(devices)) {
 - [ ] Remove file renaming block (lines 64-78)
 - [ ] Add job ID storage
 - [ ] Add devices array storage
+- [ ] Add file path storage for generated reports
 - [ ] Keep resultJSON storage
 - [ ] Update logging
 
@@ -409,10 +438,26 @@ try {
     log(`No devices array found, set to empty array`);
   }
 
+  // Store file paths for generated reports (for PGUI download links)
+  const inputBasename = path.basename(assembledPath, '.xlsx');
+  const statusReportPath = path.join(PYTHON_SCRIPT_HCD_HOME, 'upload-results', `${inputBasename}-results.xlsx`);
+  const heatAnalysisPath = path.join(PYTHON_SCRIPT_HCD_HOME, 'test_done', `${inputBasename}_heat min per hour.xlsx`);
+
+  // Verify files exist before storing paths
+  job.data.statusReportPath = fs.existsSync(statusReportPath) ? statusReportPath : null;
+  job.data.heatAnalysisPath = fs.existsSync(heatAnalysisPath) ? heatAnalysisPath : null;
+
+  if (job.data.statusReportPath) {
+    log(`Status report available: ${job.data.statusReportPath}`);
+  }
+  if (job.data.heatAnalysisPath) {
+    log(`Heat analysis available: ${job.data.heatAnalysisPath}`);
+  }
+
   try {
     // Bull 3.29.0 => we can call job.update(...) to store changed data
     await job.update(job.data);
-    log(`Job ${job.id} data updated successfully with jobId, devices, and resultJSON`);
+    log(`Job ${job.id} data updated successfully with jobId, devices, and file paths`);
   } catch (updateErr) {
     log(`Failed to update job data: ${updateErr}`);
   }
@@ -460,6 +505,8 @@ try {
 - [ ] Upload single file with heating data
 - [ ] Verify job data contains `jobId`
 - [ ] Verify `devices` array populated correctly
+- [ ] Verify `statusReportPath` points to existing file in `upload-results/`
+- [ ] Verify `heatAnalysisPath` points to existing file in `test_done/`
 - [ ] Verify file NOT renamed
 - [ ] Verify `destinationPath` matches actual file
 
@@ -468,6 +515,8 @@ try {
 - [ ] Upload single file with no heating
 - [ ] Verify job data contains `jobId`
 - [ ] Verify `devices` array is empty `[]`
+- [ ] Verify `statusReportPath` still exists (report generated even for failures)
+- [ ] Verify `heatAnalysisPath` still exists (workbook created even with 0 summary rows)
 - [ ] Verify file NOT renamed
 - [ ] Verify `destinationPath` matches actual file
 
@@ -476,6 +525,8 @@ try {
 - [ ] Upload large file (chunked) with heating data
 - [ ] Verify job data contains `jobId`
 - [ ] Verify `devices` array populated correctly
+- [ ] Verify `statusReportPath` points to existing file
+- [ ] Verify `heatAnalysisPath` points to existing file
 - [ ] Verify file NOT renamed
 - [ ] Verify `assembledPath` matches actual file
 
@@ -494,6 +545,9 @@ try {
 - [ ] Expand "Data" column, verify new fields present
 - [ ] Verify `jobId` matches row ID
 - [ ] Verify `devices` array visible
+- [ ] Verify `statusReportPath` and `heatAnalysisPath` visible
+- [ ] Test download links for both files (if PGUI implements download feature)
+- [ ] Verify downloaded files match the stored paths
 
 **Test 6.2.2: File Location**
 
@@ -642,6 +696,8 @@ If issues arise, rollback can be performed quickly:
       "device_serial": "80646F049736"
     }
   ],
+  "statusReportPath": "/home/chris/projects/heat-cycle-detection/upload-results/20251027_225619_MC45MDU3-results.xlsx",
+  "heatAnalysisPath": "/home/chris/projects/heat-cycle-detection/test_done/20251027_225619_MC45MDU3_heat min per hour.xlsx",
   "resultJSON": {
     "mode": "live-run",
     "summary-rows": 30,
@@ -657,8 +713,10 @@ If issues arise, rollback can be performed quickly:
 }
 ```
 
-**Actual file on disk:**
-`20251027_225619_MC45MDU3.xlsx` ← **MATCHES destinationPath**
+**Actual files on disk:**
+- Input file: `20251027_225619_MC45MDU3.xlsx` ← **MATCHES destinationPath**
+- Status report: `upload-results/20251027_225619_MC45MDU3-results.xlsx` ← **MATCHES statusReportPath**
+- Heat analysis: `test_done/20251027_225619_MC45MDU3_heat min per hour.xlsx` ← **MATCHES heatAnalysisPath**
 
 ---
 
@@ -678,11 +736,135 @@ job.data.resultJSON = result;
 job.data.jobId = job.id;
 const devices = result["heating-serial-devices"];
 job.data.devices = Array.isArray(devices) ? devices : [];
-log(`Job ${job.id}: stored ${job.data.devices.length} device(s)`);
+
+// Store file paths for PGUI download links
+const inputBasename = path.basename(assembledPath, '.xlsx');
+const statusReportPath = path.join(PYTHON_SCRIPT_HCD_HOME, 'upload-results', `${inputBasename}-results.xlsx`);
+const heatAnalysisPath = path.join(PYTHON_SCRIPT_HCD_HOME, 'test_done', `${inputBasename}_heat min per hour.xlsx`);
+job.data.statusReportPath = fs.existsSync(statusReportPath) ? statusReportPath : null;
+job.data.heatAnalysisPath = fs.existsSync(heatAnalysisPath) ? heatAnalysisPath : null;
+
+log(`Job ${job.id}: stored ${job.data.devices.length} device(s), paths: status=${!!job.data.statusReportPath}, analysis=${!!job.data.heatAnalysisPath}`);
 ```
 
-**Total Lines Changed:** ~15 lines removed, ~8 lines added
-**Net Change:** -7 lines
+**Total Lines Changed:** ~15 lines removed, ~15 lines added
+**Net Change:** ~0 lines (similar size, more functionality)
+
+---
+
+## Appendix C: PGUI Download Implementation
+
+### C.1 API Endpoint for File Downloads
+
+The PGUI will need a new API endpoint to serve the generated report files:
+
+**Location:** `pgui/src/pages/api/downloadReport.js` (new file)
+
+**Purpose:** Securely serve device status reports and heat analysis workbooks
+
+**Example Implementation:**
+```javascript
+import fs from 'fs';
+import path from 'path';
+
+export default async function handler(req, res) {
+  const { filePath } = req.query;
+
+  // Security: Validate file path is within allowed directories
+  const allowedDirs = [
+    path.join(process.env.NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME, 'upload-results'),
+    path.join(process.env.NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME, 'test_done')
+  ];
+
+  const resolvedPath = path.resolve(filePath);
+  const isAllowed = allowedDirs.some(dir => resolvedPath.startsWith(dir));
+
+  if (!isAllowed) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  // Serve the file
+  const filename = path.basename(resolvedPath);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+  const fileStream = fs.createReadStream(resolvedPath);
+  fileStream.pipe(res);
+}
+```
+
+### C.2 UI Component Updates
+
+**Location:** `pgui/src/pages/esaver/index.js`
+
+**Changes Needed:**
+
+1. **Add Download Buttons in Job Monitor Table:**
+   ```jsx
+   // In the job row, add download links
+   {job.data?.statusReportPath && (
+     <a
+       href={`/api/downloadReport?filePath=${encodeURIComponent(job.data.statusReportPath)}`}
+       download
+       className="text-blue-600 hover:underline mr-2"
+     >
+       📊 Status Report
+     </a>
+   )}
+   {job.data?.heatAnalysisPath && (
+     <a
+       href={`/api/downloadReport?filePath=${encodeURIComponent(job.data.heatAnalysisPath)}`}
+       download
+       className="text-blue-600 hover:underline"
+     >
+       📈 Heat Analysis
+     </a>
+   )}
+   ```
+
+2. **Add Downloads Column to Table:**
+   ```jsx
+   <thead>
+     <tr>
+       <th>ID</th>
+       <th>Status</th>
+       <th>File</th>
+       <th>Devices</th>
+       <th>Summary Rows</th>
+       <th>Downloads</th>  {/* NEW COLUMN */}
+       <th>Data</th>
+     </tr>
+   </thead>
+   ```
+
+3. **Display Download Status:**
+   ```jsx
+   // Show availability of reports
+   <td>
+     {job.data?.statusReportPath ? '✅' : '⏳'} Status<br/>
+     {job.data?.heatAnalysisPath ? '✅' : '⏳'} Analysis
+   </td>
+   ```
+
+### C.3 User Experience Flow
+
+**After Upload:**
+1. User uploads file via PGUI
+2. Job appears in Job Monitor with "Processing..." status
+3. When complete, Download column shows available reports
+4. User clicks "📊 Status Report" to download diagnostic info
+5. User clicks "📈 Heat Analysis" to download multi-sheet workbook
+6. Files download with original naming convention
+
+**Benefits:**
+- Immediate access to diagnostic reports
+- No need to SSH into server
+- Self-service troubleshooting
+- Historical report access via Bull job retention
 
 ---
 
