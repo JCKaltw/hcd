@@ -4,3 +4,7 @@ test_done/
 uploads/
 logs/
 /pg2-uploads
+/upload-results
+/pgui
+/test-batch
+/test-multi

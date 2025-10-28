@@ -87,6 +87,28 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     heating_device_readings_count = 0
     # Initialize list to store heating device info for JSON output
     heating_serial_devices = []
+    # Initialize device statistics dictionary
+    device_stats = {
+        'filepath': filepath,
+        'device_name': None,
+        'device_serial': None,
+        'test_run_rows': 0,
+        'supply_min': None,
+        'supply_max': None,
+        'supply_mean': None,
+        'return_min': None,
+        'return_max': None,
+        'return_mean': None,
+        'diff_min': None,
+        'diff_max': None,
+        'diff_mean': None,
+        'rows_above_7c_threshold': 0,
+        'rows_supply_gt_return': 0,
+        'heating_groups_detected': 0,
+        'valid_heating_groups': 0,
+        'summary_rows': 0,
+        'status': 'unknown'
+    }
 
     xls = pd.ExcelFile(filepath)
     raw_df = pd.read_excel(xls, sheet_name=0, header=None)
@@ -104,10 +126,12 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             df = df[df["Note"] == "Test Run"].copy()
         else:
             print(f"❌ 'Note' column not found after renaming in: {filepath}")
-            return 0, 0, 0, []
+            device_stats['status'] = 'error_no_note_column'
+            return 0, 0, 0, [], device_stats
     else:
         print(f"❌ Not enough columns to rename 7th column to 'Note' in: {filepath}")
-        return 0, 0, 0, []
+        device_stats['status'] = 'error_insufficient_columns'
+        return 0, 0, 0, [], device_stats
 
     # Insert "Device Name" and "MAC Serial #"
     device_name = raw_df.iloc[0, 1]
@@ -115,6 +139,10 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     mac_serial = hex_upper(mac_serial)  # Normalize serial number format
     df["Device Name"] = device_name
     df["MAC Serial #"] = mac_serial
+
+    # Update device stats
+    device_stats['device_name'] = device_name
+    device_stats['device_serial'] = mac_serial
     cols = ["Device Name", "MAC Serial #"] + [col for col in df.columns if col not in ["Device Name", "MAC Serial #"]]
     df = df[cols]
 
@@ -152,6 +180,23 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     df_filtered["Date"] = pd.to_datetime(df_filtered["Date"])
     supply = df_filtered["Supply Temp/C"].values
     return_temp = df_filtered["Return Temp/C"].values  # <-- needed for the new version1a logic
+
+    # Collect temperature statistics for device status report
+    device_stats['test_run_rows'] = len(df_filtered)
+    device_stats['supply_min'] = float(df_filtered["Supply Temp/C"].min())
+    device_stats['supply_max'] = float(df_filtered["Supply Temp/C"].max())
+    device_stats['supply_mean'] = float(df_filtered["Supply Temp/C"].mean())
+    device_stats['return_min'] = float(df_filtered["Return Temp/C"].min())
+    device_stats['return_max'] = float(df_filtered["Return Temp/C"].max())
+    device_stats['return_mean'] = float(df_filtered["Return Temp/C"].mean())
+
+    # Calculate temperature differential stats
+    temp_diff = df_filtered["Supply Temp/C"] - df_filtered["Return Temp/C"]
+    device_stats['diff_min'] = float(temp_diff.min())
+    device_stats['diff_max'] = float(temp_diff.max())
+    device_stats['diff_mean'] = float(temp_diff.mean())
+    device_stats['rows_above_7c_threshold'] = int((temp_diff >= 7.0).sum())
+    device_stats['rows_supply_gt_return'] = int((temp_diff > 0).sum())
 
     # ----------------------------------------------------------------------------
     # Heating detection logic merged from version1a:
@@ -207,6 +252,7 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     # Validate heating groups (already updated to 0.6 in version2)
     # ----------------------------------------------------------------------------
     valid_groups = []
+    total_groups = len([gid for gid in df_filtered["Heating_Group"].unique() if gid > 0])
     for gid in df_filtered["Heating_Group"].unique():
         if gid == 0:
             continue
@@ -214,6 +260,10 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
         valid_rows = (group_rows["Supply Temp/C"] >= group_rows["Return Temp/C"] + 7).sum()
         if valid_rows / len(group_rows) >= 0.6:
             valid_groups.append(gid)
+
+    # Update device stats with heating group counts
+    device_stats['heating_groups_detected'] = total_groups
+    device_stats['valid_heating_groups'] = len(valid_groups)
 
     df_filtered.loc[~df_filtered["Heating_Group"].isin(valid_groups), ["Heating", "Heating_Group"]] = ["Off", 0]
 
@@ -252,6 +302,15 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
     summary_df = pd.DataFrame(summaries)
     summary_rows_count = len(summary_df)
     print("Summary Rows:", summary_rows_count)
+
+    # Update device stats with final results and status
+    device_stats['summary_rows'] = summary_rows_count
+    if summary_rows_count > 0:
+        device_stats['status'] = 'success'
+    elif device_stats['rows_above_7c_threshold'] == 0:
+        device_stats['status'] = 'no_heating_detected'
+    else:
+        device_stats['status'] = 'heating_failed_validation'
 
     # Save outputs (initial save)
     with pd.ExcelWriter(savepath, engine='openpyxl') as writer:
@@ -294,7 +353,8 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
 
         if len(unique_serials) != 1:
             print("❌ More than one distinct device_serial found in summary data. Aborting DB insertion.")
-            return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
+            device_stats['status'] = 'error_multiple_serials'
+            return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices, device_stats
 
         serial_for_device = str(unique_serials[0])
         serial_for_device = hex_upper(serial_for_device)  # Normalize serial number format
@@ -345,7 +405,8 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
                 
             except Exception as e:
                 print(f"❌ Failed to insert device into 'heating_device': {e}")
-                return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
+                device_stats['status'] = 'error_db_insertion'
+                return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices, device_stats
 
         detroit_tz = pytz.timezone("America/Detroit")
         # Count reading insert attempts
@@ -424,8 +485,8 @@ def process_file(filepath, savepath, insert_db=False, do_upserts=False, dry_run=
             print(f"⚠️  Completed inserts with potential duplicates skipped by ON CONFLICT.")
         print("✅ Data insertion complete.")
 
-    # Return counters for JSON summary
-    return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices
+    # Return counters for JSON summary and device stats
+    return summary_rows_count, heating_devices_count, heating_device_readings_count, heating_serial_devices, device_stats
 
 
 def main():
@@ -487,15 +548,23 @@ def main():
     total_heating_readings = 0
     # Initialize list to collect all heating device entries
     all_heating_serial_devices = []
+    # Initialize list to collect all device statistics
+    all_device_stats = []
 
     default_source_folder = os.getcwd()
+
+    # Determine upload-results directory (sibling to uploads)
+    uploads_dir = os.path.join(default_source_folder, target_folder)
+    parent_dir = os.path.dirname(uploads_dir) if target_folder != "." else default_source_folder
+    upload_results_dir = os.path.join(parent_dir, "upload-results")
+    os.makedirs(upload_results_dir, exist_ok=True)
 
     if args.input_file:
         input_path = os.path.join(default_source_folder, args.input_file)
         if os.path.isfile(input_path) and input_path.endswith(".xlsx") and not os.path.basename(input_path).startswith("~$"):
             name, _ = os.path.splitext(os.path.basename(input_path))
             save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-            summary, dev_count, read_count, devices = process_file(
+            summary, dev_count, read_count, devices, stats = process_file(
                 input_path,
                 save_path,
                 insert_db=args.insert_db,
@@ -506,6 +575,7 @@ def main():
             total_heating_devices += dev_count
             total_heating_readings += read_count
             all_heating_serial_devices.extend(devices)
+            all_device_stats.append(stats)
         else:
             print(f"❌ File not found or invalid format: {input_path}")
     else:
@@ -514,7 +584,7 @@ def main():
                 full_path = os.path.join(default_source_folder, filename)
                 name, _ = os.path.splitext(filename)
                 save_path = os.path.join(target_folder, f"{name}_heat min per hour.xlsx")
-                summary, dev_count, read_count, devices = process_file(
+                summary, dev_count, read_count, devices, stats = process_file(
                     full_path,
                     save_path,
                     insert_db=args.insert_db,
@@ -525,6 +595,141 @@ def main():
                 total_heating_devices += dev_count
                 total_heating_readings += read_count
                 all_heating_serial_devices.extend(devices)
+                all_device_stats.append(stats)
+
+    # Generate device-status.xlsx report if any files were processed
+    if all_device_stats:
+        # Reorder columns for better readability
+        column_order = [
+            'filepath', 'device_name', 'device_serial', 'status',
+            'test_run_rows', 'summary_rows',
+            'supply_min', 'supply_max', 'supply_mean',
+            'return_min', 'return_max', 'return_mean',
+            'diff_min', 'diff_max', 'diff_mean',
+            'rows_supply_gt_return', 'rows_above_7c_threshold',
+            'heating_groups_detected', 'valid_heating_groups'
+        ]
+
+        # Create vertical format: headers in column A, values in column B, comments in column C
+        # With blank rows between multiple records
+        vertical_data = []
+        for idx, stats in enumerate(all_device_stats):
+            # Add blank row separator between records (except before first)
+            if idx > 0:
+                vertical_data.append(['', '', ''])
+
+            # Add each field as a row with explanatory comments
+            for col in column_order:
+                value = stats.get(col, '')
+                comment = ''
+
+                # Add comments for threshold-related fields
+                if col == 'status':
+                    if value == 'no_heating_detected':
+                        comment = 'NO HEATING: Supply temp never exceeded return by required 7°C'
+                    elif value == 'heating_failed_validation':
+                        comment = 'VALIDATION FAILED: Heating detected but could not sustain 7°C for 60% of cycle'
+                    elif value == 'success':
+                        comment = 'SUCCESS: Valid heating cycles detected and processed'
+
+                elif col == 'summary_rows':
+                    if value == 0:
+                        comment = 'ZERO OUTPUT: No valid heating hours generated for database insertion'
+
+                elif col == 'diff_max':
+                    if isinstance(value, (int, float)):
+                        if value < 7.0:
+                            comment = f'BELOW THRESHOLD: Max differential {value:.1f}°C < 7.0°C required for validation'
+                        elif value >= 7.0:
+                            comment = f'Above 7°C threshold (validation requirement met for this metric)'
+
+                elif col == 'diff_mean':
+                    if isinstance(value, (int, float)):
+                        if value < 0:
+                            comment = 'NEGATIVE: Supply cooler than return (indicates cooling mode or sensor issue)'
+                        elif value >= 0 and value < 7.0:
+                            comment = 'POSITIVE but below 7°C: Some heating activity but insufficient for validation'
+
+                elif col == 'rows_above_7c_threshold':
+                    if value == 0:
+                        comment = 'CRITICAL: No rows met 7°C validation threshold - cannot generate valid heating cycles'
+                    elif isinstance(value, int) and value > 0:
+                        total_rows = stats.get('test_run_rows', 1)
+                        pct = (value / total_rows * 100) if total_rows > 0 else 0
+                        comment = f'{pct:.1f}% of total rows meet 7°C threshold'
+
+                elif col == 'valid_heating_groups':
+                    detected = stats.get('heating_groups_detected', 0)
+                    if value == 0 and detected > 0:
+                        comment = f'VALIDATION FAILED: {detected} groups detected but none sustained 7°C for 60% of cycle'
+                    elif value > 0:
+                        comment = f'{value}/{detected} detected groups passed 60% validation rule'
+
+                elif col == 'heating_groups_detected':
+                    if value == 0:
+                        comment = 'No temperature patterns triggered heating detection (>5°C jump + supply>return)'
+                    elif value > 0:
+                        comment = f'{value} potential heating cycles detected (requires validation)'
+
+                vertical_data.append([col, value, comment])
+
+        # Create DataFrame with vertical format including comments
+        vertical_df = pd.DataFrame(vertical_data, columns=['Field', 'Value', 'Comment'])
+
+        # Determine output filename based on input mode
+        if args.input_file:
+            # Single file mode: use input filename with -results.xlsx
+            input_basename = os.path.basename(args.input_file)
+            input_name_no_ext = os.path.splitext(input_basename)[0]
+            status_filename = f"{input_name_no_ext}-results.xlsx"
+        else:
+            # Batch mode: use timestamp-based filename
+            now = datetime.now()
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+            status_filename = f"batch-{timestamp}-results.xlsx"
+
+        # Write to upload-results directory
+        status_report_path = os.path.join(upload_results_dir, status_filename)
+        vertical_df.to_excel(status_report_path, index=False, engine='openpyxl')
+
+        # Format the Excel file for better readability
+        from openpyxl import load_workbook
+        from openpyxl.styles import Font, Alignment
+
+        wb = load_workbook(status_report_path)
+        ws = wb.active
+
+        # Make Field column (column A) bold
+        bold_font = Font(bold=True)
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=1):
+            for cell in row:
+                cell.font = bold_font
+
+        # Left-justify Value column (column B) - all data rows, not header
+        left_align = Alignment(horizontal='left')
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=2, max_col=2):
+            for cell in row:
+                cell.alignment = left_align
+
+        # Auto-size all columns to fit content
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+
+            for cell in column:
+                try:
+                    cell_value = str(cell.value) if cell.value is not None else ''
+                    if len(cell_value) > max_length:
+                        max_length = len(cell_value)
+                except:
+                    pass
+
+            # Add some padding and set column width
+            adjusted_width = min(max_length + 2, 100)  # Cap at 100 to avoid extremely wide columns
+            ws.column_dimensions[column_letter].width = adjusted_width
+
+        wb.save(status_report_path)
+        print(f"📊 Device status report written to: {status_report_path}")
 
     # Output JSON summary regardless of logging
     mode = "dry-run" if args.dry_run else "live-run"
