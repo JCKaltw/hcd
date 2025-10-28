@@ -104,7 +104,65 @@ if (Array.isArray(devices) && devices.length > 0) {
 }
 ```
 
-### 2.3 Files Involved
+### 2.3 File Chunking Mechanism
+
+**Overview:**
+
+The system supports uploading large files (>512KB) by splitting them into chunks during transport. This is purely a **network optimization** - by the time hcd.py processes the file, all chunks have been reassembled into a single complete file.
+
+**Chunking Process:**
+
+1. **Upload Detection** (`esaverUpload.js`):
+   - Files ≤512KB: Single upload mode
+   - Files >512KB: Chunked upload mode (512KB chunks)
+
+2. **Chunk Assembly** (`esaverUpload.js`):
+   - Server receives chunks sequentially
+   - Chunks are written to temporary directory
+   - When all chunks received, they're concatenated into single file
+   - Complete file is moved to `uploads/` directory with timestamp-based filename (e.g., `20251027_130410_MC40MTQw.xlsx`)
+
+3. **Job Data Tracking**:
+   ```javascript
+   // Single upload
+   {
+     mode: "single",
+     originalFileName: "ORSxxxx.xlsx",
+     destinationPath: "/uploads/timestamp_base64.xlsx"
+   }
+
+   // Chunked upload
+   {
+     mode: "chunked",
+     chunkCount: 5,
+     originalFileName: "ORSxxxx.xlsx",
+     assembledPath: "/uploads/timestamp_base64.xlsx"  // Complete reassembled file
+   }
+   ```
+
+4. **Processing** (`bullWorker.js` → `hcd.py`):
+   - Bull worker receives job with complete file path (`assembledPath` or `destinationPath`)
+   - Executes `hcd.py --input-file "complete_file.xlsx"`
+   - **hcd.py has NO knowledge of chunking** - it only sees the complete file
+   - Generates JSON output based on complete file content
+
+5. **Result JSON**:
+   - JSON output contains `mode: "live-run"` or `mode: "dry-run"` (processing mode, not upload mode)
+   - **No trace of chunking in JSON** - reflects only the data found in the complete file
+   - Device information extracted from complete workbook only
+
+**Key Point: Chunking is Transparent to Processing**
+
+The chunking mechanism is **completely transparent** to the data processing pipeline:
+- ✅ Chunks are reassembled **before** hcd.py execution
+- ✅ hcd.py always processes a **single complete Excel file**
+- ✅ JSON output reflects **complete file data only**
+- ❌ No chunk boundaries in JSON
+- ❌ No chunk metadata in results
+
+The only way to know a file was chunked is to check `job.data.mode === "chunked"` in the Bull queue job data.
+
+### 2.4 Files Involved
 
 | File | Role | Changes Required |
 |------|------|------------------|
