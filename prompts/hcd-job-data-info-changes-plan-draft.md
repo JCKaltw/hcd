@@ -96,7 +96,7 @@ This section provides a high-level overview for the PGUI development team. Detai
 - 🚫 Return 403 for unauthorized path access
 
 **Security Considerations:**
-- Only allow downloads from `upload-results/` and `test_done/` directories
+- Only allow downloads from `HCD_HOME/upload-results/` and `HCD_HOME/test_done/` directories
 - Validate file paths to prevent directory traversal attacks
 - Use `path.resolve()` and prefix checking
 
@@ -339,7 +339,7 @@ The system supports uploading large files (>512KB) by splitting them into chunks
    - Server receives chunks sequentially
    - Chunks are written to temporary directory
    - When all chunks received, they're concatenated into single file
-   - Complete file is moved to `uploads/` directory with timestamp-based filename (e.g., `20251027_130410_MC40MTQw.xlsx`)
+   - Complete file is moved to `HCD_HOME/uploads/` directory with timestamp-based filename (e.g., `20251027_130410_MC40MTQw.xlsx`)
 
 3. **Job Data Tracking**:
    ```javascript
@@ -471,8 +471,8 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
       device_serial: "80646F049736"
     }
   ],
-  statusReportPath: "/path/to/upload-results/20251027_130410_MC40MTQw-results.xlsx",  // ← NEW
-  heatAnalysisPath: "/path/to/test_done/20251027_130410_MC40MTQw_heat min per hour.xlsx",  // ← NEW
+  statusReportPath: "/path/to/HCD_HOME/upload-results/20251027_130410_MC40MTQw-results.xlsx",  // ← NEW
+  heatAnalysisPath: "/path/to/HCD_HOME/test_done/20251027_130410_MC40MTQw_heat min per hour.xlsx",  // ← NEW
   resultJSON: {
     mode: "live-run",
     summary-rows: 30,
@@ -499,13 +499,13 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
 The PGUI will be able to provide download links for generated files using the stored paths:
 
 **1. Device Status Report** (`statusReportPath`):
-- Location: `upload-results/` directory
+- Location: `HCD_HOME/upload-results/` directory
 - Filename: `{input_basename}-results.xlsx`
 - Content: Vertical format diagnostic report with temperature statistics and validation failures
 - Available: Always (for every processed file)
 
 **2. Heat Analysis Workbook** (`heatAnalysisPath`):
-- Location: `test_done/` directory
+- Location: `HCD_HOME/test_done/` directory
 - Filename: `{input_basename}_heat min per hour.xlsx`
 - Content: Multi-sheet workbook with 5 sheets (Original Data, Filtered Test Run, Heating Data Set, Heat Cleaned Data, Discarded)
 - Available: Always (created even for 0 summary rows)
@@ -724,8 +724,8 @@ try {
 - [ ] Upload single file with heating data
 - [ ] Verify job data contains `jobId`
 - [ ] Verify `devices` array populated correctly
-- [ ] Verify `statusReportPath` points to existing file in `upload-results/`
-- [ ] Verify `heatAnalysisPath` points to existing file in `test_done/`
+- [ ] Verify `statusReportPath` points to existing file in `HCD_HOME/upload-results/`
+- [ ] Verify `heatAnalysisPath` points to existing file in `HCD_HOME/test_done/`
 - [ ] Verify file NOT renamed
 - [ ] Verify `destinationPath` matches actual file
 
@@ -770,7 +770,7 @@ try {
 
 **Test 7.2.2: File Location**
 
-- [ ] After processing, locate file in `uploads/` directory
+- [ ] After processing, locate file in `HCD_HOME/uploads/` directory
 - [ ] Verify filename matches `destinationPath` or `assembledPath` from job data
 - [ ] Verify no renamed files exist
 
@@ -933,9 +933,9 @@ If issues arise, rollback can be performed quickly:
 ```
 
 **Actual files on disk:**
-- Input file: `20251027_225619_MC45MDU3.xlsx` ← **MATCHES destinationPath**
-- Status report: `upload-results/20251027_225619_MC45MDU3-results.xlsx` ← **MATCHES statusReportPath**
-- Heat analysis: `test_done/20251027_225619_MC45MDU3_heat min per hour.xlsx` ← **MATCHES heatAnalysisPath**
+- Input file: `HCD_HOME/uploads/20251027_225619_MC45MDU3.xlsx` ← **MATCHES destinationPath**
+- Status report: `HCD_HOME/upload-results/20251027_225619_MC45MDU3-results.xlsx` ← **MATCHES statusReportPath**
+- Heat analysis: `HCD_HOME/test_done/20251027_225619_MC45MDU3_heat min per hour.xlsx` ← **MATCHES heatAnalysisPath**
 
 ---
 
