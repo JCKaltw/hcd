@@ -1,20 +1,27 @@
-# HCD Job Data Information Changes - Implementation Plan
+# HCD Job Data Information Changes - Implementation Plan (DRAFT)
 
 **Date:** October 28, 2025
-**Project:** Heat Cycle Detection System
-**Purpose:** Eliminate file renaming, add Job ID to data, and store complete device array
+**Project:** Heat Cycle Detection System - PGUI Component
+**Status:** DRAFT - Awaiting PGUI Team Review
+**Scope:** PGUI modules only (no changes to Python hcd.py)
+**Purpose:** Eliminate file renaming, add Job ID to data, store complete device array, and fix security issue
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Current State Analysis](#2-current-state-analysis)
-3. [Problems Identified](#3-problems-identified)
-4. [Proposed Changes](#4-proposed-changes)
-5. [Implementation Plan](#5-implementation-plan)
-6. [Testing Strategy](#6-testing-strategy)
-7. [Rollback Plan](#7-rollback-plan)
+2. [PGUI Team - Quick Reference](#2-pgui-team---quick-reference)
+   - 2.1 [Backend Changes](#21-backend-changes)
+   - 2.2 [Frontend Changes](#22-frontend-changes)
+   - 2.3 [Summary of New Job Data Structure](#23-summary-of-new-job-data-structure)
+   - 2.4 [Security Issue - Environment Variable Exposure](#24-security-issue---environment-variable-exposure)
+3. [Current State Analysis](#3-current-state-analysis)
+4. [Problems Identified](#4-problems-identified)
+5. [Proposed Changes](#5-proposed-changes)
+6. [Implementation Plan](#6-implementation-plan)
+7. [Testing Strategy](#7-testing-strategy)
+8. [Rollback Plan](#8-rollback-plan)
 
 ---
 
@@ -38,9 +45,221 @@ The current implementation has several issues related to job data management:
 
 ---
 
-## 2. Current State Analysis
+## 2. PGUI Team - Quick Reference
 
-### 2.1 Current Job Data Structure
+### Required PGUI Module Changes
+
+This section provides a high-level overview for the PGUI development team. Detailed implementation code is provided in later sections.
+
+#### 2.1 Backend Changes
+
+**Module:** `pgui/scripts/bullWorker.js` (Bull job processor)
+**Priority:** **HIGH** - Core functionality change
+**What:** Remove file renaming logic and add new job data fields
+**Why:**
+- File renaming causes path mismatch between job data and actual files
+- Missing job ID and device information makes troubleshooting difficult
+- Need to provide file paths for PGUI download features
+
+**Changes:**
+- ✂️ Remove lines 64-78 (file renaming block)
+- ➕ Add `jobId` field (self-referencing job ID)
+- ➕ Add `devices` array (complete device list, not just first device)
+- ➕ Add `statusReportPath` (path to diagnostic report Excel file)
+- ➕ Add `heatAnalysisPath` (path to multi-sheet heat analysis workbook)
+- 🔍 Verify files exist before storing paths
+- 📝 Update logging to reflect new fields
+
+**Testing Impact:** Requires full integration testing with file uploads
+
+---
+
+**Module:** `pgui/src/pages/api/esaverUpload.js` (Upload API endpoint)
+**Priority:** **LOW** - No changes required
+**What:** No modifications needed
+**Why:** This module creates initial job data structure which remains unchanged. New fields are added by bullWorker.js after processing completes.
+
+**Changes:** None
+
+---
+
+**Module:** `pgui/src/pages/api/downloadReport.js` (NEW FILE)
+**Priority:** **MEDIUM** - New feature for user downloads
+**What:** Create new API endpoint to serve generated Excel files
+**Why:** Allow users to download diagnostic reports and heat analysis workbooks directly from Job Monitor
+
+**Changes:**
+- 🆕 Create new file with download handler
+- 🔒 Implement security checks (validate paths are within allowed directories)
+- 📄 Serve Excel files with proper headers
+- ✅ Handle 404 for missing files
+- 🚫 Return 403 for unauthorized path access
+
+**Security Considerations:**
+- Only allow downloads from `upload-results/` and `test_done/` directories
+- Validate file paths to prevent directory traversal attacks
+- Use `path.resolve()` and prefix checking
+
+---
+
+#### 2.2 Frontend Changes
+
+**Module:** `pgui/src/pages/esaver/index.js` (Job Monitor UI)
+**Priority:** **MEDIUM** - User-facing improvements
+**What:** Add download links and display new job data fields
+**Why:** Provide users with easy access to diagnostic reports and analysis files without requiring SSH access
+
+**Changes:**
+- ➕ Add "Downloads" column to job table
+- 🔗 Add download links for status report (📊 icon/button)
+- 🔗 Add download links for heat analysis (📈 icon/button)
+- ✅ Show availability status (✅ available, ⏳ processing)
+- 👁️ Display device count and first device serial in table
+- 📋 Show `jobId`, `devices`, and file paths in expanded "Data" section
+
+**UI Enhancements:**
+- Download buttons only appear when files are available
+- Graceful handling of jobs processed before this change (missing fields)
+- Clear visual indicators for report availability
+
+---
+
+### 2.3 Summary of New Job Data Structure
+
+**New Fields Added to `job.data`:**
+
+```javascript
+{
+  jobId: 12345,              // NEW - Self-referencing Bull job ID
+  devices: [...],            // NEW - Complete array of all devices found
+  statusReportPath: "...",   // NEW - Path to diagnostic Excel report
+  heatAnalysisPath: "...",   // NEW - Path to multi-sheet analysis workbook
+  // ... existing fields unchanged
+}
+```
+
+**Removed Behavior:**
+- ❌ Files are NO LONGER renamed after processing
+- ❌ `destinationPath`/`assembledPath` now always matches actual filename
+
+**Benefits:**
+- ✅ Consistent file paths across system
+- ✅ Complete device information accessible
+- ✅ Easy cross-referencing via job ID
+- ✅ Self-service file downloads for users
+- ✅ Better troubleshooting and diagnostics
+
+---
+
+### 2.4 Security Issue - Environment Variable Exposure
+
+**Module:** `.env` and `pgui/src/pages/api/esaverUpload.js`
+**Priority:** **HIGH** - Security vulnerability
+**Issue:** Server file system path exposed to client-side JavaScript
+
+#### Current Problem
+
+The production environment variable uses the `NEXT_PUBLIC_` prefix:
+
+```bash
+# From .env on pg2 host
+NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME="/home/chris/projects/heat-cycle-detection"
+```
+
+**Security Concern:**
+
+In Next.js, the `NEXT_PUBLIC_` prefix causes the environment variable to be **embedded in the client-side JavaScript bundle**, making it visible to anyone who inspects the browser's JavaScript files. This exposes:
+- Internal server file system paths
+- Username information (`/home/chris/...`)
+- Project directory structure
+- Sensitive system information
+
+**Current Usage:**
+
+```javascript
+// src/pages/api/esaverUpload.js (line references from grep)
+const HCD_HOME = process.env.NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME || "/default/path";
+```
+
+This API route is **server-side only** (runs in Node.js backend), so the `NEXT_PUBLIC_` prefix is unnecessary and harmful.
+
+#### Recommended Solution
+
+**What:** Remove `NEXT_PUBLIC_` prefix to make this a server-side-only environment variable
+
+**Why:**
+- API routes (`pages/api/*`) run server-side only and can access regular environment variables
+- Client-side code should never need to know server file system paths
+- Reduces security surface area by not exposing internal paths
+
+**Changes Required:**
+
+1. **Update `.env` file on pg2:**
+   ```bash
+   # Before (EXPOSED TO CLIENT):
+   NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME="/home/chris/projects/heat-cycle-detection"
+
+   # After (SERVER-SIDE ONLY):
+   PYTHON_SCRIPT_HCD_HOME="/home/chris/projects/heat-cycle-detection"
+   ```
+
+2. **Update `pgui/scripts/bullWorker.js`:**
+   ```javascript
+   // Before:
+   const PYTHON_SCRIPT_HCD_HOME =
+     process.env.NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME ||
+     "/Users/chris/projects/heat-cycle-detection";
+
+   // After:
+   const PYTHON_SCRIPT_HCD_HOME =
+     process.env.PYTHON_SCRIPT_HCD_HOME ||
+     "/Users/chris/projects/heat-cycle-detection";
+   ```
+
+3. **Update `pgui/src/pages/api/esaverUpload.js`:**
+   ```javascript
+   // Before:
+   const HCD_HOME = process.env.NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME || "/default/path";
+
+   // After:
+   const HCD_HOME = process.env.PYTHON_SCRIPT_HCD_HOME || "/default/path";
+   ```
+
+4. **Check for other references:**
+   ```bash
+   # Search all PGUI files for usage
+   grep -r "NEXT_PUBLIC_PYTHON_SCRIPT_HCD_HOME" pgui/
+   ```
+
+**Testing:**
+
+- [ ] Verify environment variable loads correctly in API routes
+- [ ] Verify environment variable loads correctly in bullWorker.js
+- [ ] Verify variable does NOT appear in browser's JavaScript bundle
+  - Open browser DevTools → Sources tab
+  - Search all JavaScript files for "PYTHON_SCRIPT_HCD_HOME"
+  - Should return NO results in client bundles
+- [ ] Verify file uploads still work correctly
+- [ ] Verify Bull worker processing still works
+
+**Benefits:**
+- 🔒 Removes exposure of server file system paths from public JavaScript
+- 🔒 Follows security best practice (principle of least privilege)
+- ✅ No functional impact (API routes can still access the variable)
+- ✅ Reduces attack surface for potential security audits
+
+**Next.js Documentation Reference:**
+
+From Next.js docs:
+> Variables prefixed with `NEXT_PUBLIC_` are embedded into the browser bundle. Only use this prefix for variables that are **safe to expose to the browser**.
+
+Since server file paths are **NOT safe to expose**, this variable should not use the prefix.
+
+---
+
+## 3. Current State Analysis
+
+### 3.1 Current Job Data Structure
 
 **Initial Creation** (esaverUpload.js):
 ```javascript
@@ -82,7 +301,7 @@ File on disk: 80646F049736-45-20251027_130410_MC40MTQw.xlsx
 Job data destinationPath: /path/to/uploads/20251027_130410_MC40MTQw.xlsx  ← BROKEN
 ```
 
-### 2.2 Current File Renaming Logic
+### 3.2 Current File Renaming Logic
 
 **Location:** `pgui/scripts/bullWorker.js` lines 64-78
 
@@ -104,7 +323,7 @@ if (Array.isArray(devices) && devices.length > 0) {
 }
 ```
 
-### 2.3 File Chunking Mechanism
+### 3.3 File Chunking Mechanism
 
 **Overview:**
 
@@ -162,7 +381,7 @@ The chunking mechanism is **completely transparent** to the data processing pipe
 
 The only way to know a file was chunked is to check `job.data.mode === "chunked"` in the Bull queue job data.
 
-### 2.4 Files Involved
+### 3.4 Files Involved
 
 | File | Role | Changes Required |
 |------|------|------------------|
@@ -172,9 +391,9 @@ The only way to know a file was chunked is to check `job.data.mode === "chunked"
 
 ---
 
-## 3. Problems Identified
+## 4. Problems Identified
 
-### 3.1 File Path Mismatch
+### 4.1 File Path Mismatch
 
 **Problem:**
 Job data stores `destinationPath: "/path/to/uploads/20251027_130410_MC40MTQw.xlsx"` but actual file is renamed to `80646F049736-45-20251027_130410_MC40MTQw.xlsx`.
@@ -187,7 +406,7 @@ Job data stores `destinationPath: "/path/to/uploads/20251027_130410_MC40MTQw.xls
 **Root Cause:**
 File is renamed after job data is updated, and job data is not re-updated with new path.
 
-### 3.2 Lost Device Information
+### 4.2 Lost Device Information
 
 **Problem:**
 If a file contains multiple devices, only the first device is used for renaming. Other devices are ignored.
@@ -200,7 +419,7 @@ If a file contains multiple devices, only the first device is used for renaming.
 **Root Cause:**
 Code only extracts `devices[0]` from array.
 
-### 3.3 Missing Job ID
+### 4.3 Missing Job ID
 
 **Problem:**
 Job data doesn't include its own Job ID for self-reference.
@@ -215,9 +434,9 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
 
 ---
 
-## 4. Proposed Changes
+## 5. Proposed Changes
 
-### 4.1 New Job Data Structure
+### 5.1 New Job Data Structure
 
 **Proposed Structure:**
 ```javascript
@@ -266,7 +485,7 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
 }
 ```
 
-### 4.2 Benefits of New Structure
+### 5.2 Benefits of New Structure
 
 - [x] **Consistent File Paths** - `destinationPath` always matches actual file
 - [x] **Complete Device Information** - All devices accessible at top level
@@ -275,7 +494,7 @@ Job ID is managed by Bull queue, not explicitly stored in job.data.
 - [x] **Backward Compatible** - `resultJSON` structure unchanged
 - [x] **Simplified Troubleshooting** - Single source of truth for all job information
 
-### 4.3 File Paths for PGUI Downloads
+### 5.3 File Paths for PGUI Downloads
 
 The PGUI will be able to provide download links for generated files using the stored paths:
 
@@ -300,7 +519,7 @@ The Python script already generates these files with predictable naming patterns
 
 ---
 
-## 5. Implementation Plan
+## 6. Implementation Plan
 
 ### Phase 1: Remove File Renaming Logic
 
@@ -496,11 +715,11 @@ try {
 
 ---
 
-## 6. Testing Strategy
+## 7. Testing Strategy
 
-### 6.1 Unit Testing
+### 7.1 Unit Testing
 
-**Test 6.1.1: Single file upload with heating detected**
+**Test 7.1.1: Single file upload with heating detected**
 
 - [ ] Upload single file with heating data
 - [ ] Verify job data contains `jobId`
@@ -510,7 +729,7 @@ try {
 - [ ] Verify file NOT renamed
 - [ ] Verify `destinationPath` matches actual file
 
-**Test 6.1.2: Single file upload with no heating**
+**Test 7.1.2: Single file upload with no heating**
 
 - [ ] Upload single file with no heating
 - [ ] Verify job data contains `jobId`
@@ -520,7 +739,7 @@ try {
 - [ ] Verify file NOT renamed
 - [ ] Verify `destinationPath` matches actual file
 
-**Test 6.1.3: Chunked file upload with heating detected**
+**Test 7.1.3: Chunked file upload with heating detected**
 
 - [ ] Upload large file (chunked) with heating data
 - [ ] Verify job data contains `jobId`
@@ -530,15 +749,15 @@ try {
 - [ ] Verify file NOT renamed
 - [ ] Verify `assembledPath` matches actual file
 
-**Test 6.1.4: Multi-device file (if possible)**
+**Test 7.1.4: Multi-device file (if possible)**
 
 - [ ] If multi-device files exist, test with one
 - [ ] Verify ALL devices stored in `devices` array
 - [ ] Verify order preserved from `heating-serial-devices`
 
-### 6.2 Integration Testing
+### 7.2 Integration Testing
 
-**Test 6.2.1: Job Monitor Display**
+**Test 7.2.1: Job Monitor Display**
 
 - [ ] Upload file and process
 - [ ] Check Job Monitor table shows correct data
@@ -549,26 +768,26 @@ try {
 - [ ] Test download links for both files (if PGUI implements download feature)
 - [ ] Verify downloaded files match the stored paths
 
-**Test 6.2.2: File Location**
+**Test 7.2.2: File Location**
 
 - [ ] After processing, locate file in `uploads/` directory
 - [ ] Verify filename matches `destinationPath` or `assembledPath` from job data
 - [ ] Verify no renamed files exist
 
-**Test 6.2.3: Backward Compatibility**
+**Test 7.2.3: Backward Compatibility**
 
 - [ ] Verify old jobs (before changes) still display correctly
 - [ ] Verify no errors when accessing jobs without `jobId` or `devices` fields
 
-### 6.3 Regression Testing
+### 7.3 Regression Testing
 
-**Test 6.3.1: Database Insertion**
+**Test 7.3.1: Database Insertion**
 
 - [ ] Verify hcd.py still inserts data correctly
 - [ ] Verify device_serial matches job data
 - [ ] Verify summary rows count matches
 
-**Test 6.3.2: Logging**
+**Test 7.3.2: Logging**
 
 - [ ] Check `esaver-upload.log` for new log messages
 - [ ] Verify no errors during job data update
@@ -576,13 +795,13 @@ try {
 
 ---
 
-## 7. Rollback Plan
+## 8. Rollback Plan
 
-### 7.1 Rollback Procedure
+### 8.1 Rollback Procedure
 
 If issues arise, rollback can be performed quickly:
 
-**Step 7.1.1: Revert bullWorker.js**
+**Step 8.1.1: Revert bullWorker.js**
 
 - [ ] Restore previous version from git:
   ```bash
@@ -590,19 +809,19 @@ If issues arise, rollback can be performed quickly:
   git checkout HEAD~1 scripts/bullWorker.js
   ```
 
-**Step 7.1.2: Restart Bull Worker**
+**Step 8.1.2: Restart Bull Worker**
 
 - [ ] Stop current worker process
 - [ ] Start worker with reverted code
 - [ ] Monitor logs for successful startup
 
-**Step 7.1.3: Verify Operation**
+**Step 8.1.3: Verify Operation**
 
 - [ ] Process test file
 - [ ] Verify old behavior (file renaming) works
 - [ ] Check job data structure
 
-### 7.2 Rollback Considerations
+### 8.2 Rollback Considerations
 
 **Data Compatibility:**
 - New fields (`jobId`, `devices`) are additive only
@@ -635,15 +854,15 @@ If issues arise, rollback can be performed quickly:
 
 ### Testing
 
-- [ ] **Test 6.1.1:** Single file with heating
-- [ ] **Test 6.1.2:** Single file without heating
-- [ ] **Test 6.1.3:** Chunked file with heating
-- [ ] **Test 6.1.4:** Multi-device file (if available)
-- [ ] **Test 6.2.1:** Job Monitor display
-- [ ] **Test 6.2.2:** File location verification
-- [ ] **Test 6.2.3:** Backward compatibility
-- [ ] **Test 6.3.1:** Database insertion
-- [ ] **Test 6.3.2:** Logging verification
+- [ ] **Test 7.1.1:** Single file with heating
+- [ ] **Test 7.1.2:** Single file without heating
+- [ ] **Test 7.1.3:** Chunked file with heating
+- [ ] **Test 7.1.4:** Multi-device file (if available)
+- [ ] **Test 7.2.1:** Job Monitor display
+- [ ] **Test 7.2.2:** File location verification
+- [ ] **Test 7.2.3:** Backward compatibility
+- [ ] **Test 7.3.1:** Database insertion
+- [ ] **Test 7.3.2:** Logging verification
 
 ### Post-Implementation
 
